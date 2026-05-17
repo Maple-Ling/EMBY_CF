@@ -1,42 +1,17 @@
-# Dependencies
-node_modules/
-package-lock.json
-yarn.lock
-
-# Wrangler
+# Wrangler 本地缓存
 .wrangler/
-wrangler.toml.bak
 
-# Environment variables
-.env
-.env.local
-.env.production
+# Node modules
+node_modules/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
+# 系统文件
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# 编辑器配置
+.vscode/
+.idea/
 
-# Build output
-dist/
-build/
-
-# Backup files
-*.bak
-*备份*
-*源码*
-
-# Worker build artifacts (exclude worker.js itself)
-worker_*.js
+# 本地环境变量
+.env
+.env.local
