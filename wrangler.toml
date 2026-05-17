@@ -1,7 +1,7 @@
 # wrangler.toml - Cloudflare Worker Emby 反向代理配置
 # 使用前请根据自己的环境修改以下配置
 
-name = "emby-proxy"
+name = "emby-proxy-xm"
 main = "worker.js"
 compatibility_date = "2026-03-01"
 workers_dev = true
