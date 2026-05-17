@@ -1,1420 +1,2689 @@
-const CURRENT_VERSION = '3.1-simplified';
+/**
+ * =================================================================================
+ *              Cloudflare Worker Emby 反向代理 (管理版)
+ * =================================================================================
+ *
+ * 版本: 3.0
+ * 功能: 别名管理、多线路故障转移、智能选线、管理后台
+ *
+ */
 
 const OPTIMIZED_DOMAINS = [
-  { subdomain: 'proxy1', domain: 'cf.090227.xyz', name: 'CF优选-090227' },
-  { subdomain: 'proxy2', domain: 'cf.877774.xyz', name: 'CF优选-877774' },
-  { subdomain: 'proxy3', domain: 'cloudflare-dl.byoip.top', name: '鱼皮优选' },
-  { subdomain: 'proxy4', domain: 'saas.sin.fan', name: 'MIYU优选' },
-  { subdomain: 'proxy5', domain: 'bestcf.030101.xyz', name: 'Mingyu优选' },
-  { subdomain: 'proxy6', domain: 'cf.cloudflare.182682.xyz', name: 'WeTest优选' },
-  { subdomain: 'proxy7', domain: 'cf.tencentapp.cn', name: '腾讯泛域名' },
-  { subdomain: 'proxy8', domain: 'www.visa.cn', name: 'Visa官方' },
-  { subdomain: 'proxy9', domain: 'mfa.gov.ua', name: '乌克兰外交部' },
-  { subdomain: 'proxy10', domain: 'www.shopify.com', name: 'Shopify官方' },
-  { subdomain: 'proxy11', domain: 'store.ubi.com', name: '育碧商店' },
-  { subdomain: 'proxy12', domain: 'staticdelivery.nexusmods.com', name: 'NexusMods' },
+    { subdomain: 'proxy1', domain: 'cf.090227.xyz', name: 'CF优选-090227' },
+    { subdomain: 'proxy2', domain: 'cf.877774.xyz', name: 'CF优选-877774' },
+    { subdomain: 'proxy3', domain: 'cloudflare-dl.byoip.top', name: '鱼皮优选' },
+    { subdomain: 'proxy4', domain: 'saas.sin.fan', name: 'MIYU优选' },
+    { subdomain: 'proxy5', domain: 'bestcf.030101.xyz', name: 'Mingyu优选' },
+    { subdomain: 'proxy6', domain: 'cf.cloudflare.182682.xyz', name: 'WeTest优选' },
+    { subdomain: 'proxy7', domain: 'cf.tencentapp.cn', name: '腾讯泛域名' },
+    { subdomain: 'proxy8', domain: 'www.visa.cn', name: 'Visa官方' },
+    { subdomain: 'proxy9', domain: 'mfa.gov.ua', name: '乌克兰外交部' },
+    { subdomain: 'proxy10', domain: 'www.shopify.com', name: 'Shopify官方' },
+    { subdomain: 'proxy11', domain: 'store.ubi.com', name: '育碧商店' },
 ];
-
-const RESERVED_ALIASES = new Set([
-  'admin', 'stats', 'health', 'api', 'favicon.ico', 'cdn-cgi',
-  '__client_rtt__', 'web', 'emby', 'sessions', 'playbackinfo',
-]);
 
 const MANUAL_REDIRECT_DOMAINS = [
-  'emby.bangumi.ca', 'aliyundrive.com', 'aliyundrive.net', 'aliyuncs.com', 'alicdn.com', 'aliyun.com',
-  'cdn.aliyundrive.com', 'xunlei.com', 'xlusercdn.com', 'xycdn.com', 'sandai.net', 'thundercdn.com',
-  '115.com', '115cdn.com', '115cdn.net', 'anxia.com', '189.cn', 'mini189.cn', 'ctyunxs.cn',
-  'cloud.189.cn', 'tianyiyun.com', 'telecomjs.com', 'quark.cn', 'quarkdrive.cn', 'uc.cn', 'ucdrive.cn',
-  'xiaoya.pro', 'myqcloud.com', 'cloudfront.net', 'akamaized.net', 'fastly.net', 'hwcdn.net', 'bytecdn.cn', 'bdcdn.net',
+    'emby.bangumi.ca',
+    'aliyundrive.com', 'aliyundrive.net', 'aliyuncs.com', 'alicdn.com', 'aliyun.com', 'cdn.aliyundrive.com',
+    'xunlei.com', 'xlusercdn.com', 'xycdn.com', 'sandai.net', 'thundercdn.com',
+    '115.com', '115cdn.com', '115cdn.net', 'anxia.com',
+    '189.cn', 'mini189.cn', 'ctyunxs.cn', 'cloud.189.cn', 'tianyiyun.com', 'telecomjs.com',
+    'quark.cn', 'quarkdrive.cn', 'uc.cn', 'ucdrive.cn',
+    'xiaoya.pro',
+    'myqcloud.com', 'cloudfront.net', 'akamaized.net', 'fastly.net', 'hwcdn.net', 'bytecdn.cn', 'bdcdn.net'
 ];
 
-const DOMAIN_PROXY_RULES = { 'biliblili.uk': 'example.com' };
+const DOMAIN_PROXY_RULES = {
+    'biliblili.uk': 'example.com',
+};
+
 const JP_COLOS = ['NRT', 'KIX', 'FUK', 'OKA'];
 
 const blocker = {
-  keys: ['.m3u8', '.ts', '.acc', '.m4s', 'photocall.tv', 'googlevideo.com'],
-  check(url) {
-    url = url.toLowerCase();
-    return blocker.keys.some((x) => url.includes(x));
-  },
+    keys: [".m3u8", ".ts", ".acc", ".m4s", "photocall.tv", "googlevideo.com"],
+    check: function (url) {
+        url = url.toLowerCase();
+        return blocker.keys.some(x => url.includes(x));
+    }
+};
+
+const PREFLIGHT_INIT = {
+    status: 204,
+    headers: new Headers({
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "*"
+    })
 };
 
 const CONFIG = {
-  pikpakProxyUrl: 'https://pp.255432.xyz',
-  enableStats: true,
-  cacheEnabled: true,
-  domainCacheTtlMs: 3600000,
+    pikpakProxyUrl: 'https://pp.255432.xyz',
+    enableStats: true,
+    cacheEnabled: true,
+    speedtestCacheTTL: 3600,
+    rateLimit: { maxRequests: 1000, windowMs: 60000 }
 };
 
 const PIKPAK_DOMAINS = [
-  'pikpak.com', 'pikpak.net', 'pikpak-cn.com', 'pikpakcdn.com', 'pikpakapi.com', 'pikpakdrive.com',
+    'pikpak.com', 'pikpak.net', 'pikpak-cn.com', 'pikpakcdn.com', 'pikpakapi.com', 'pikpakdrive.com'
 ];
 
-const CORS_JSON = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' };
+const _aliasCache = new Map();
+const ALIAS_CACHE_TTL = 300000;
+let _dbInitialized = false;
 
-let dbReady = false;
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), { status, headers: CORS_JSON });
+async function getAliasConfig(env, aliasName) {
+    const cached = _aliasCache.get(aliasName);
+    if (cached && (Date.now() - cached.ts) < ALIAS_CACHE_TTL) {
+        return cached.data;
+    }
+    if (!env.DB) return null;
+    try {
+        const alias = await env.DB.prepare('SELECT * FROM aliases WHERE alias = ?').bind(aliasName).first();
+        if (!alias) {
+            _aliasCache.delete(aliasName);
+            return null;
+        }
+        const lines = await env.DB.prepare(
+            'SELECT * FROM alias_lines WHERE alias_id = ? ORDER BY sort_order, id'
+        ).bind(alias.id).all();
+        const data = { alias, lines: lines.results || [] };
+        _aliasCache.set(aliasName, { data, ts: Date.now() });
+        if (_aliasCache.size > 200) {
+            const now = Date.now();
+            for (const [k, v] of _aliasCache) {
+                if (now - v.ts >= ALIAS_CACHE_TTL) _aliasCache.delete(k);
+            }
+        }
+        return data;
+    } catch (e) {
+        console.error('Alias cache fetch error:', e.message);
+        return cached ? cached.data : null;
+    }
 }
 
-function html(body, status = 200) {
-  return new Response(body, { status, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+function invalidateAliasCache(aliasName) {
+    if (aliasName) {
+        _aliasCache.delete(aliasName);
+    } else {
+        _aliasCache.clear();
+    }
 }
 
-function getCookie(req, name) {
-  const s = req.headers.get('Cookie');
-  if (!s) return null;
-  const m = s.match(new RegExp('(^| )' + name + '=([^;]+)'));
-  return m ? decodeURIComponent(m[2]) : null;
+async function readRequestBody(request) {
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) return null;
+    try {
+        const ct = (request.headers.get('content-type') || '').toLowerCase();
+        if (ct.includes('application/json')) {
+            return await request.text();
+        } else if (ct.includes('application/text') || ct.includes('text/html')) {
+            return await request.text();
+        } else if (ct.includes('form')) {
+            return await request.formData();
+        } else {
+            return await request.blob();
+        }
+    } catch (e) {
+        return null;
+    }
 }
 
-function getAdminToken(env) {
-  const raw = env.ADMIN_TOKEN ?? env.ADMIN_PASSWORD ?? env.admin_token ?? env.AdminToken;
-  if (raw == null) return null;
-  const t = String(raw).trim();
-  return t.length ? t : null;
+const LOGIN_UI = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理后台登录</title>
+    <style>
+        :root {
+            --primary: #0a84ff;
+            --primary-hover: #0071e3;
+            --bg: #1a1c22;
+            --card: #252830;
+            --text: #e1e4e8;
+            --text-sec: #8b8fa3;
+            --border: #3e4451;
+            --radius: 12px;
+            --shadow: 0 8px 32px rgba(0,0,0,0.35);
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+            -webkit-font-smoothing: antialiased;
+        }
+        .login-container {
+            width: 100%;
+            max-width: 380px;
+            animation: fadeUp 0.5s ease-out;
+        }
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .login-header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        .login-icon {
+            width: 64px;
+            height: 64px;
+            background: linear-gradient(135deg, var(--primary), #5856d6);
+            border-radius: 16px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 16px;
+            font-size: 28px;
+        }
+        .login-header h1 {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text);
+            letter-spacing: -0.3px;
+        }
+        .login-header p {
+            font-size: 13px;
+            color: var(--text-sec);
+            margin-top: 6px;
+        }
+        .login-card {
+            background: var(--card);
+            border-radius: 20px;
+            padding: 32px 28px;
+            box-shadow: var(--shadow);
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-sec);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .input-wrap {
+            position: relative;
+        }
+        .input-wrap input {
+            width: 100%;
+            padding: 14px 44px 14px 16px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            font-size: 15px;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .input-wrap input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(10,132,255,0.2);
+        }
+        .input-wrap input::placeholder {
+            color: #555a6e;
+        }
+        .input-wrap .toggle-vis {
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: var(--text-sec);
+            cursor: pointer;
+            padding: 4px;
+            font-size: 16px;
+            line-height: 1;
+        }
+        .input-wrap .toggle-vis:hover {
+            color: var(--primary);
+        }
+        .btn-login {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, var(--primary), #5856d6);
+            color: #fff;
+            border: none;
+            border-radius: var(--radius);
+            font-size: 15px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: opacity 0.2s, transform 0.1s;
+            letter-spacing: 0.3px;
+        }
+        .btn-login:hover {
+            opacity: 0.92;
+        }
+        .btn-login:active {
+            transform: scale(0.98);
+        }
+        .btn-login:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #toast {
+            position: fixed;
+            top: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(-80px);
+            background: var(--card);
+            color: var(--text);
+            padding: 12px 24px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 500;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+            border: 1px solid var(--border);
+            z-index: 9999;
+            opacity: 0;
+            transition: transform 0.35s cubic-bezier(0.4,0,0.2,1), opacity 0.35s ease;
+            pointer-events: none;
+        }
+        #toast.show {
+            transform: translateX(-50%) translateY(0);
+            opacity: 1;
+        }
+        .login-footer {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #444a5e;
+        }
+    </style>
+</head>
+<body>
+    <div id="toast"></div>
+    <div class="login-container">
+        <div class="login-header">
+            <div class="login-icon">\u{1F512}</div>
+            <h1>管理后台登录</h1>
+            <p>Cloudflare Worker Emby Proxy</p>
+        </div>
+        <div class="login-card">
+            <div class="form-group">
+                <label>管理密钥</label>
+                <div class="input-wrap">
+                    <input type="password" id="tokenInput" placeholder="请输入管理密钥 (ADMIN_TOKEN)" onkeydown="if(event.key==='Enter') doLogin()">
+                    <button class="toggle-vis" onclick="toggleVis()" type="button" id="visBtn">\u{1F441}</button>
+                </div>
+            </div>
+            <button class="btn-login" id="loginBtn" onclick="doLogin()">登 录</button>
+        </div>
+        <div class="login-footer">Powered by Cloudflare Workers</div>
+    </div>
+    <script>
+        (function() {
+            var cookies = document.cookie.split(';');
+            for (var i = 0; i < cookies.length; i++) {
+                var c = cookies[i].trim();
+                if (c.indexOf('admin_token=') === 0) {
+                    var val = c.substring('admin_token='.length);
+                    if (val && val !== '' && val !== 'undefined') {
+                        fetch('/admin/api/verify').then(function(r) { return r.json(); }).then(function(d) {
+                            if (d.ok) window.location.href = '/admin';
+                        });
+                        return;
+                    }
+                }
+            }
+        })();
+
+        function showToast(msg, duration) {
+            var t = document.getElementById('toast');
+            t.textContent = msg;
+            t.classList.add('show');
+            setTimeout(function() { t.classList.remove('show'); }, duration || 2500);
+        }
+
+        function toggleVis() {
+            var inp = document.getElementById('tokenInput');
+            var btn = document.getElementById('visBtn');
+            if (inp.type === 'password') {
+                inp.type = 'text';
+                btn.textContent = '\u{1F441}\u{200D}\u{1F5E8}';
+            } else {
+                inp.type = 'password';
+                btn.textContent = '\u{1F441}';
+            }
+        }
+
+        function doLogin() {
+            var input = document.getElementById('tokenInput');
+            var btn = document.getElementById('loginBtn');
+            var token = input.value.trim();
+            if (!token) {
+                showToast('请输入管理密钥');
+                input.focus();
+                return;
+            }
+            btn.disabled = true;
+            btn.textContent = '验证中...';
+            document.cookie = 'admin_token=' + encodeURIComponent(token) + '; path=/; max-age=2592000; SameSite=Lax';
+            fetch('/admin/api/verify').then(function(r) { return r.json(); }).then(function(d) {
+                if (d.ok) {
+                    showToast('登录成功，正在跳转...', 1200);
+                    setTimeout(function() { window.location.href = '/admin'; }, 800);
+                } else {
+                    document.cookie = 'admin_token=; path=/; max-age=0';
+                    showToast(d.error || '密钥错误，请重试');
+                    btn.disabled = false;
+                    btn.textContent = '登 录';
+                    input.value = '';
+                    input.focus();
+                }
+            }).catch(function() {
+                showToast('网络错误，请重试');
+                btn.disabled = false;
+                btn.textContent = '登 录';
+            });
+        }
+    </script>
+</body>
+</html>`;
+
+const ADMIN_UI = '<!DOCTYPE html>\n\
+<html lang="zh-CN">\n\
+<head>\n\
+<meta charset="utf-8">\n\
+<meta name="viewport" content="width=device-width, initial-scale=1">\n\
+<title>\u7BA1\u7406\u540E\u53F0</title>\n\
+<style>\n\
+:root {\n\
+  --primary: #0a84ff;\n\
+  --primary-hover: #0070e3;\n\
+  --bg: #000;\n\
+  --card: #1c1c1e;\n\
+  --card-hover: #2c2c2e;\n\
+  --text: #f5f5f7;\n\
+  --text-sec: #98989d;\n\
+  --border: #38383a;\n\
+  --danger: #ff453a;\n\
+  --success: #30d158;\n\
+  --warning: #ff9f0a;\n\
+  --danger-bg: rgba(255,69,58,0.12);\n\
+  --success-bg: rgba(48,209,88,0.12);\n\
+  --warning-bg: rgba(255,159,10,0.12);\n\
+  --modal-bg: rgba(0,0,0,0.65);\n\
+  --radius: 16px;\n\
+  --radius-sm: 10px;\n\
+  --shadow: 0 4px 24px rgba(0,0,0,0.25);\n\
+  --shadow-lg: 0 16px 48px rgba(0,0,0,0.5);\n\
+  --transition: 0.25s cubic-bezier(0.4,0,0.2,1);\n\
+}\n\
+body.light {\n\
+  --primary: #0071e3;\n\
+  --primary-hover: #005cbf;\n\
+  --bg: #f5f5f7;\n\
+  --card: #fff;\n\
+  --card-hover: #f0f0f2;\n\
+  --text: #1d1d1f;\n\
+  --text-sec: #86868b;\n\
+  --border: #d2d2d7;\n\
+  --danger: #ff3b30;\n\
+  --success: #34c759;\n\
+  --warning: #ff9500;\n\
+  --danger-bg: rgba(255,59,48,0.1);\n\
+  --success-bg: rgba(52,199,89,0.1);\n\
+  --warning-bg: rgba(255,149,0,0.1);\n\
+  --modal-bg: rgba(0,0,0,0.35);\n\
+  --shadow: 0 4px 24px rgba(0,0,0,0.08);\n\
+  --shadow-lg: 0 16px 48px rgba(0,0,0,0.15);\n\
+}\n\
+* { box-sizing: border-box; margin: 0; padding: 0; }\n\
+body {\n\
+  font-family: -apple-system, "SF Pro Display", system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;\n\
+  line-height: 1.5;\n\
+  color: var(--text);\n\
+  background: var(--bg);\n\
+  min-height: 100vh;\n\
+  -webkit-font-smoothing: antialiased;\n\
+  transition: background var(--transition), color var(--transition);\n\
+}\n\
+.container {\n\
+  max-width: 1000px;\n\
+  margin: 0 auto;\n\
+  padding: 24px 20px 60px;\n\
+  display: flex;\n\
+  flex-direction: column;\n\
+  gap: 24px;\n\
+}\n\
+.card {\n\
+  background: var(--card);\n\
+  border-radius: var(--radius);\n\
+  padding: 24px;\n\
+  box-shadow: var(--shadow);\n\
+  border: 1px solid var(--border);\n\
+  transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);\n\
+}\n\
+.card:hover {\n\
+  border-color: color-mix(in srgb, var(--primary) 30%, var(--border));\n\
+}\n\
+.header {\n\
+  display: flex;\n\
+  align-items: center;\n\
+  justify-content: space-between;\n\
+  gap: 16px;\n\
+  flex-wrap: wrap;\n\
+}\n\
+.header h1 {\n\
+  font-size: 1.5em;\n\
+  font-weight: 700;\n\
+  margin: 0;\n\
+  letter-spacing: -0.02em;\n\
+}\n\
+.header-actions {\n\
+  display: flex;\n\
+  align-items: center;\n\
+  gap: 8px;\n\
+}\n\
+.section-title {\n\
+  font-size: 1.15em;\n\
+  font-weight: 600;\n\
+  margin-bottom: 16px;\n\
+  display: flex;\n\
+  align-items: center;\n\
+  gap: 8px;\n\
+}\n\
+.btn {\n\
+  display: inline-flex;\n\
+  align-items: center;\n\
+  gap: 6px;\n\
+  padding: 10px 18px;\n\
+  background: var(--primary);\n\
+  color: #fff;\n\
+  border-radius: var(--radius-sm);\n\
+  text-decoration: none;\n\
+  font-weight: 600;\n\
+  border: none;\n\
+  cursor: pointer;\n\
+  font-size: 14px;\n\
+  transition: all var(--transition);\n\
+  white-space: nowrap;\n\
+  font-family: inherit;\n\
+}\n\
+.btn:hover { background: var(--primary-hover); transform: translateY(-1px); }\n\
+.btn:active { transform: translateY(0); }\n\
+.btn-sm { padding: 6px 12px; font-size: 12px; border-radius: 8px; }\n\
+.btn-ghost {\n\
+  background: transparent;\n\
+  color: var(--text-sec);\n\
+  border: 1px solid var(--border);\n\
+}\n\
+.btn-ghost:hover {\n\
+  background: var(--card-hover);\n\
+  color: var(--text);\n\
+  border-color: var(--text-sec);\n\
+}\n\
+.btn-danger {\n\
+  background: transparent;\n\
+  color: var(--danger);\n\
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);\n\
+}\n\
+.btn-danger:hover {\n\
+  background: var(--danger-bg);\n\
+}\n\
+.btn-icon {\n\
+  width: 36px;\n\
+  height: 36px;\n\
+  padding: 0;\n\
+  display: inline-flex;\n\
+  align-items: center;\n\
+  justify-content: center;\n\
+  border-radius: 50%;\n\
+  background: transparent;\n\
+  color: var(--text-sec);\n\
+  border: 1px solid var(--border);\n\
+  cursor: pointer;\n\
+  font-size: 16px;\n\
+  transition: all var(--transition);\n\
+}\n\
+.btn-icon:hover {\n\
+  background: var(--card-hover);\n\
+  color: var(--text);\n\
+}\n\
+.toolbar {\n\
+  display: flex;\n\
+  gap: 10px;\n\
+  flex-wrap: wrap;\n\
+  align-items: center;\n\
+  margin-bottom: 16px;\n\
+}\n\
+.search-input {\n\
+  flex: 1;\n\
+  min-width: 180px;\n\
+  max-width: 280px;\n\
+  padding: 10px 14px;\n\
+  padding-left: 36px;\n\
+  border: 1px solid var(--border);\n\
+  border-radius: var(--radius-sm);\n\
+  background: var(--bg);\n\
+  color: var(--text);\n\
+  font-size: 14px;\n\
+  transition: all var(--transition);\n\
+  font-family: inherit;\n\
+  outline: none;\n\
+  background-image: url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'16\' height=\'16\' fill=\'%2398989d\' viewBox=\'0 0 16 16\'%3E%3Cpath d=\'M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.442.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z\'/%3E%3C/svg%3E");\n\
+  background-repeat: no-repeat;\n\
+  background-position: 12px center;\n\
+}\n\
+.search-input:focus {\n\
+  border-color: var(--primary);\n\
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);\n\
+}\n\
+.search-input::placeholder { color: var(--text-sec); }\n\
+input[type=text], input[type=url], input[type=password], select {\n\
+  width: 100%;\n\
+  padding: 12px 14px;\n\
+  border: 1px solid var(--border);\n\
+  border-radius: var(--radius-sm);\n\
+  background: var(--bg);\n\
+  color: var(--text);\n\
+  font-size: 14px;\n\
+  transition: all var(--transition);\n\
+  font-family: inherit;\n\
+  outline: none;\n\
+}\n\
+input:focus, select:focus {\n\
+  border-color: var(--primary);\n\
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);\n\
+}\n\
+select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'12\' height=\'12\' fill=\'%2398989d\' viewBox=\'0 0 16 16\'%3E%3Cpath d=\'M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z\'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; }\n\
+label {\n\
+  display: block;\n\
+  font-weight: 600;\n\
+  margin-bottom: 6px;\n\
+  font-size: 13px;\n\
+  color: var(--text-sec);\n\
+  text-transform: uppercase;\n\
+  letter-spacing: 0.3px;\n\
+}\n\
+.form-row { margin-bottom: 16px; }\n\
+.form-row:last-child { margin-bottom: 0; }\n\
+.checkbox-label {\n\
+  display: inline-flex;\n\
+  align-items: center;\n\
+  gap: 8px;\n\
+  font-weight: 500;\n\
+  font-size: 14px;\n\
+  color: var(--text);\n\
+  cursor: pointer;\n\
+  text-transform: none;\n\
+  letter-spacing: 0;\n\
+}\n\
+.checkbox-label input[type=checkbox] {\n\
+  width: 18px;\n\
+  height: 18px;\n\
+  accent-color: var(--primary);\n\
+  cursor: pointer;\n\
+}\n\
+.alias-grid {\n\
+  display: grid;\n\
+  grid-template-columns: 1fr;\n\
+  gap: 16px;\n\
+}\n\
+.alias-card {\n\
+  background: var(--card);\n\
+  border: 1px solid var(--border);\n\
+  border-radius: var(--radius);\n\
+  overflow: hidden;\n\
+  transition: all var(--transition);\n\
+}\n\
+.alias-card:hover {\n\
+  border-color: color-mix(in srgb, var(--primary) 40%, var(--border));\n\
+  box-shadow: 0 4px 20px rgba(0,0,0,0.15);\n\
+}\n\
+.alias-card-header {\n\
+  display: flex;\n\
+  align-items: center;\n\
+  gap: 12px;\n\
+  padding: 16px 20px;\n\
+  border-bottom: 1px solid var(--border);\n\
+  background: color-mix(in srgb, var(--primary) 4%, var(--card));\n\
+}\n\
+.alias-icon {\n\
+  font-size: 1.6em;\n\
+  line-height: 1;\n\
+  width: 40px;\n\
+  height: 40px;\n\
+  display: flex;\n\
+  align-items: center;\n\
+  justify-content: center;\n\
+  background: color-mix(in srgb, var(--primary) 10%, transparent);\n\
+  border-radius: 10px;\n\
+  flex-shrink: 0;\n\
+}\n\
+.alias-info {\n\
+  flex: 1;\n\
+  min-width: 0;\n\
+}\n\
+.alias-name {\n\
+  font-weight: 600;\n\
+  font-size: 15px;\n\
+  line-height: 1.3;\n\
+}\n\
+.alias-path {\n\
+  font-size: 12px;\n\
+  color: var(--text-sec);\n\
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;\n\
+}\n\
+.alias-actions {\n\
+  display: flex;\n\
+  gap: 6px;\n\
+  flex-shrink: 0;\n\
+}\n\
+.alias-card-body {\n\
+  padding: 0;\n\
+  overflow-x: auto;\n\
+}\n\
+.alias-card-body table {\n\
+  width: 100%;\n\
+  border-collapse: collapse;\n\
+  font-size: 13px;\n\
+}\n\
+.alias-card-body th,\n\
+.alias-card-body td {\n\
+  padding: 10px 16px;\n\
+  text-align: left;\n\
+  border-bottom: 1px solid var(--border);\n\
+}\n\
+.alias-card-body th {\n\
+  color: var(--text-sec);\n\
+  font-weight: 600;\n\
+  font-size: 11px;\n\
+  text-transform: uppercase;\n\
+  letter-spacing: 0.5px;\n\
+  background: color-mix(in srgb, var(--bg) 50%, var(--card));\n\
+}\n\
+.alias-card-body tr:last-child td { border-bottom: none; }\n\
+.alias-card-body tr:hover td { background: color-mix(in srgb, var(--primary) 3%, var(--card)); }\n\
+.alias-card-body code {\n\
+  background: color-mix(in srgb, var(--primary) 10%, transparent);\n\
+  padding: 2px 6px;\n\
+  border-radius: 4px;\n\
+  font-size: 12px;\n\
+  color: var(--primary);\n\
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;\n\
+  word-break: break-all;\n\
+}\n\
+.alias-card-footer {\n\
+  display: flex;\n\
+  gap: 8px;\n\
+  padding: 12px 20px;\n\
+  border-top: 1px solid var(--border);\n\
+  background: color-mix(in srgb, var(--bg) 30%, var(--card));\n\
+}\n\
+.empty-state {\n\
+  text-align: center;\n\
+  padding: 48px 20px;\n\
+  color: var(--text-sec);\n\
+}\n\
+.empty-state-icon { font-size: 3em; margin-bottom: 12px; opacity: 0.5; }\n\
+.empty-state-text { font-size: 15px; }\n\
+.tag {\n\
+  display: inline-flex;\n\
+  align-items: center;\n\
+  padding: 3px 8px;\n\
+  border-radius: 6px;\n\
+  font-size: 11px;\n\
+  font-weight: 600;\n\
+  letter-spacing: 0.2px;\n\
+}\n\
+.tag-off { background: color-mix(in srgb, var(--primary) 15%, transparent); color: var(--primary); }\n\
+.tag-dual { background: var(--warning-bg); color: var(--warning); }\n\
+.status-dot {\n\
+  display: inline-block;\n\
+  width: 8px;\n\
+  height: 8px;\n\
+  border-radius: 50%;\n\
+  margin-right: 6px;\n\
+}\n\
+.status-dot.fast { background: var(--success); box-shadow: 0 0 6px var(--success); }\n\
+.status-dot.good { background: var(--primary); box-shadow: 0 0 6px var(--primary); }\n\
+.status-dot.slow { background: var(--warning); box-shadow: 0 0 6px var(--warning); }\n\
+.status-dot.timeout { background: var(--danger); box-shadow: 0 0 6px var(--danger); }\n\
+.modal {\n\
+  display: none;\n\
+  position: fixed;\n\
+  inset: 0;\n\
+  background: var(--modal-bg);\n\
+  z-index: 999;\n\
+  padding: 20px;\n\
+  overflow: auto;\n\
+  backdrop-filter: blur(12px);\n\
+  -webkit-backdrop-filter: blur(12px);\n\
+}\n\
+.modal.show {\n\
+  display: flex;\n\
+  align-items: flex-start;\n\
+  justify-content: center;\n\
+}\n\
+.modal-inner {\n\
+  background: var(--card);\n\
+  padding: 28px;\n\
+  border-radius: var(--radius);\n\
+  max-width: 500px;\n\
+  width: 100%;\n\
+  margin-top: 60px;\n\
+  border: 1px solid var(--border);\n\
+  box-shadow: var(--shadow-lg);\n\
+  animation: modalIn 0.25s ease-out;\n\
+}\n\
+@keyframes modalIn {\n\
+  from { opacity: 0; transform: translateY(-20px) scale(0.97); }\n\
+  to { opacity: 1; transform: translateY(0) scale(1); }\n\
+}\n\
+.modal-inner h2 {\n\
+  margin: 0 0 20px;\n\
+  font-size: 1.2em;\n\
+  font-weight: 700;\n\
+}\n\
+.modal-toolbar {\n\
+  display: flex;\n\
+  gap: 10px;\n\
+  margin-top: 24px;\n\
+}\n\
+.modal-toolbar .btn { flex: 1; justify-content: center; }\n\
+#toast {\n\
+  position: fixed;\n\
+  top: 24px;\n\
+  left: 50%;\n\
+  transform: translateX(-50%) translateY(-100px);\n\
+  background: var(--card);\n\
+  color: var(--text);\n\
+  padding: 12px 24px;\n\
+  border-radius: var(--radius-sm);\n\
+  font-size: 14px;\n\
+  font-weight: 500;\n\
+  box-shadow: var(--shadow-lg);\n\
+  border: 1px solid var(--border);\n\
+  z-index: 9999;\n\
+  opacity: 0;\n\
+  transition: transform 0.35s cubic-bezier(0.34,1.56,0.64,1), opacity 0.25s ease;\n\
+  pointer-events: none;\n\
+  white-space: nowrap;\n\
+}\n\
+#toast.show {\n\
+  transform: translateX(-50%) translateY(0);\n\
+  opacity: 1;\n\
+}\n\
+.result-table {\n\
+  width: 100%;\n\
+  border-collapse: collapse;\n\
+  font-size: 13px;\n\
+  margin-top: 12px;\n\
+}\n\
+.result-table th,\n\
+.result-table td {\n\
+  padding: 10px 14px;\n\
+  text-align: left;\n\
+  border-bottom: 1px solid var(--border);\n\
+}\n\
+.result-table th {\n\
+  color: var(--text-sec);\n\
+  font-weight: 600;\n\
+  font-size: 11px;\n\
+  text-transform: uppercase;\n\
+  letter-spacing: 0.5px;\n\
+}\n\
+.result-table tr.best td {\n\
+  background: var(--success-bg);\n\
+  border-left: 3px solid var(--success);\n\
+}\n\
+.result-table tr:hover td {\n\
+  background: color-mix(in srgb, var(--primary) 5%, var(--card));\n\
+}\n\
+.domain-card {\n\
+  background: var(--card);\n\
+  border: 1px solid var(--border);\n\
+  border-radius: var(--radius);\n\
+  overflow: hidden;\n\
+}\n\
+.domain-card-header {\n\
+  display: flex;\n\
+  align-items: center;\n\
+  justify-content: space-between;\n\
+  gap: 12px;\n\
+  padding: 16px 20px;\n\
+  border-bottom: 1px solid var(--border);\n\
+  background: color-mix(in srgb, var(--primary) 4%, var(--card));\n\
+}\n\
+.domain-result-body {\n\
+  padding: 16px 20px;\n\
+}\n\
+.domain-best {\n\
+  margin-top: 12px;\n\
+  padding: 10px 16px;\n\
+  background: var(--success-bg);\n\
+  border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);\n\
+  border-radius: var(--radius-sm);\n\
+  font-size: 13px;\n\
+  font-weight: 500;\n\
+}\n\
+.domain-best code {\n\
+  color: var(--success);\n\
+  background: color-mix(in srgb, var(--success) 12%, transparent);\n\
+  padding: 2px 6px;\n\
+  border-radius: 4px;\n\
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;\n\
+}\n\
+.domain-no-result {\n\
+  padding: 32px;\n\
+  text-align: center;\n\
+  color: var(--text-sec);\n\
+  font-size: 14px;\n\
+}\n\
+.loading-text {\n\
+  color: var(--text-sec);\n\
+  font-size: 14px;\n\
+  display: flex;\n\
+  align-items: center;\n\
+  gap: 8px;\n\
+}\n\
+.loading-text::before {\n\
+  content: "";\n\
+  display: inline-block;\n\
+  width: 14px;\n\
+  height: 14px;\n\
+  border: 2px solid var(--border);\n\
+  border-top-color: var(--primary);\n\
+  border-radius: 50%;\n\
+  animation: spin 0.6s linear infinite;\n\
+}\n\
+@keyframes spin { to { transform: rotate(360deg); } }\n\
+@media (max-width: 640px) {\n\
+  .container { padding: 16px 12px 40px; gap: 16px; }\n\
+  .card { padding: 18px; }\n\
+  .header { gap: 12px; }\n\
+  .header h1 { font-size: 1.2em; }\n\
+  .alias-card-header { padding: 12px 14px; }\n\
+  .alias-card-body th, .alias-card-body td { padding: 8px 10px; }\n\
+  .alias-card-footer { padding: 10px 14px; }\n\
+  .modal-inner { padding: 20px; margin-top: 30px; }\n\
+  .search-input { max-width: 100%; }\n\
+}\n\
+\n\
+.icon-picker-container { position: relative; }\n\
+.icon-picker-preview { display: flex; align-items: center; gap: 10px; }\n\
+.icon-picker-current { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; background: var(--bg-tertiary); border-radius: 10px; font-size: 24px; overflow: hidden; border: 2px solid var(--border-color); flex-shrink: 0; }\n\
+.icon-picker-current img { width: 100%; height: 100%; object-fit: contain; }\n\
+.icon-picker-trigger { padding: 8px 14px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--text-secondary); transition: all 0.2s; }\n\
+.icon-picker-trigger:hover { border-color: var(--accent-blue); color: var(--accent-blue); }\n\
+#iconPickerPanel { display: none; position: absolute; left: 0; right: 0; top: 100%; margin-top: 4px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 12px; padding: 12px; z-index: 100; box-shadow: 0 8px 32px rgba(0,0,0,0.3); max-height: 320px; overflow: hidden; }\n\
+#iconPickerPanel.show { display: block; }\n\
+.icon-search { width: 100%; padding: 8px 12px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary); font-size: 13px; margin-bottom: 10px; outline: none; }\n\
+.icon-search:focus { border-color: var(--accent-blue); }\n\
+.icon-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; max-height: 240px; overflow-y: auto; padding: 2px; }\n\
+.icon-grid::-webkit-scrollbar { width: 4px; }\n\
+.icon-grid::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }\n\
+.icon-item { width: 100%; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border-radius: 8px; cursor: pointer; border: 2px solid transparent; transition: all 0.15s; background: var(--bg-tertiary); }\n\
+.icon-item:hover { border-color: var(--accent-blue); transform: scale(1.08); }\n\
+.icon-item.selected { border-color: var(--accent-blue); box-shadow: 0 0 0 2px rgba(59,130,246,0.3); }\n\
+.icon-item img { width: 80%; height: 80%; object-fit: contain; border-radius: 4px; }\n\
+.icon-item.emoji-item { font-size: 28px; }\n\
+.icon-section-label { grid-column: 1 / -1; font-size: 12px; font-weight: 600; color: var(--text-sec); padding: 6px 2px 2px; text-transform: uppercase; letter-spacing: 0.5px; }\n\
+.loading-text { grid-column: 1 / -1; text-align: center; color: var(--text-sec); padding: 30px; font-size: 13px; }\n\
+</style>\n\
+</head>\n\
+<body>\n\
+<div id="toast"></div>\n\
+<div class="container">\n\
+  <div class="card">\n\
+    <div class="header">\n\
+      <h1>\u2699\uFE0F \u7BA1\u7406\u540E\u53F0</h1>\n\
+      <div class="header-actions">\n\
+        <button class="btn-icon" onclick="toggleDark()" title="\u5207\u6362\u6DF1\u8272/\u6D45\u8272\u6A21\u5F0F">\u{1F319}</button>\n\
+        <a href="/" class="btn btn-ghost btn-sm">\u8FD4\u56DE\u9996\u9875</a>\n\
+        <button class="btn btn-danger btn-sm" onclick="logout()">\u9000\u51FA</button>\n\
+      </div>\n\
+    </div>\n\
+  </div>\n\
+\n\
+  <div>\n\
+    <div class="section-title">\u{1F3F7}\uFE0F \u522B\u540D\u7BA1\u7406</div>\n\
+    <div class="card">\n\
+      <div class="toolbar">\n\
+        <button class="btn" onclick="openAddAlias()">\u2795 \u6DFB\u52A0\u522B\u540D</button>\n\
+        <input type="text" class="search-input" id="aliasSearch" placeholder="\u641C\u7D22\u522B\u540D..." oninput="filterAliases()">\n\
+      </div>\n\
+      <div id="aliasList"><div class="loading-text">\u52A0\u8F7D\u4E2D...</div></div>\n\
+    </div>\n\
+  </div>\n\
+\n\
+  <div>\n\
+    <div class="section-title">\u26A1 \u4F18\u9009\u57DF\u540D\u6D4B\u901F</div>\n\
+    <div class="domain-card">\n\
+      <div class="domain-card-header">\n\
+        <div>\n\
+          <div style="font-weight:600;font-size:15px">\u8FB9\u7F18 \u2192 \u4F18\u9009\u5165\u53E3\u6D4B\u901F</div>\n\
+          <div style="font-size:12px;color:var(--text-sec);margin-top:2px">\u4ECE Worker \u8FB9\u7F18\u8282\u70B9\u6D4B\u8BD5\u5230\u5404\u4F18\u9009\u57DF\u540D\u7684\u5EF6\u8FDF</div>\n\
+        </div>\n\
+        <button class="btn" onclick="testDomains()">\u{1F680} \u5F00\u59CB\u6D4B\u901F</button>\n\
+      </div>\n\
+      <div class="domain-result-body" id="domainResult"><div class="domain-no-result">\u70B9\u51FB\u4E0A\u65B9\u6309\u94AE\u5F00\u59CB\u6D4B\u901F</div></div>\n\
+    </div>\n\
+  </div>\n\
+</div>\n\
+\n\
+<div id="modalAlias" class="modal" onclick="if(event.target===this)closeModal(\'modalAlias\')">\n\
+  <div class="modal-inner">\n\
+    <h2 id="aliasModalTitle">\u6DFB\u52A0\u522B\u540D</h2>\n\
+    <input type="hidden" id="aliasId">\n\
+    <div class="form-row"><label>\u540D\u79F0</label><input type="text" id="aliasName" placeholder="\u6211\u7684 Emby"></div>\n\
+    <div class="form-row"><label>\u522B\u540D\u8DEF\u5F84</label><input type="text" id="aliasPath" placeholder="my-emby"></div>\n\
+    <div class="form-row"><label>\u56FE\u6807</label>\n\
+      <div class="icon-picker-container">\n\
+        <input type="hidden" id="aliasIcon" value="\u{1F3AC}">\n\
+        <div class="icon-picker-preview">\n\
+          <div class="icon-picker-current" id="iconPickerCurrent">\u{1F3AC}</div>\n\
+          <div class="icon-picker-trigger" onclick="toggleIconPicker()">\u{1F3A8} \u9009\u62E9\u56FE\u6807</div>\n\
+          <div class="icon-picker-trigger" onclick="promptCustomIcon()" style="margin-left:4px">\u{1F517} \u81EA\u5B9A\u4E49URL</div>\n\
+        </div>\n\
+        <div id="iconPickerPanel">\n\
+          <input type="text" class="icon-search" id="iconSearchInput" placeholder="\u641C\u7D22\u56FE\u6807..." oninput="filterIcons()">\n\
+          <div class="icon-grid" id="iconGrid"></div>\n\
+        </div>\n\
+      </div>\n\
+    </div>\n\
+    <div class="modal-toolbar">\n\
+      <button class="btn btn-ghost" onclick="closeModal(\'modalAlias\')">\u53D6\u6D88</button>\n\
+      <button class="btn" onclick="saveAlias()">\u4FDD\u5B58</button>\n\
+    </div>\n\
+  </div>\n\
+</div>\n\
+\n\
+<div id="modalLine" class="modal" onclick="if(event.target===this)closeModal(\'modalLine\')">\n\
+  <div class="modal-inner">\n\
+    <h2 id="lineModalTitle">\u6DFB\u52A0\u7EBF\u8DEF</h2>\n\
+    <input type="hidden" id="lineId">\n\
+    <input type="hidden" id="lineAliasId">\n\
+    <div class="form-row"><label>\u7EBF\u8DEF\u540D\u79F0</label><input type="text" id="lineName" placeholder="\u4E3B\u7EBF\u8DEF"></div>\n\
+    <div class="form-row"><label>\u76EE\u6807\u5730\u5740</label><input type="url" id="lineTargetUrl" placeholder="https://emby.example.com:8096"></div>\n\
+    <div class="form-row" style="display:flex;gap:20px;align-items:center">\n\
+      <label class="checkbox-label"><input type="checkbox" id="lineCompat"> \u517C\u5BB9\u6A21\u5F0F</label>\n\
+      <label class="checkbox-label"><input type="checkbox" id="lineCache"> \u7F13\u5B58\u56FE\u7247</label>\n\
+    </div>\n\
+    <div class="modal-toolbar">\n\
+      <button class="btn btn-ghost" onclick="closeModal(\'modalLine\')">\u53D6\u6D88</button>\n\
+      <button class="btn" onclick="saveLine()">\u4FDD\u5B58</button>\n\
+    </div>\n\
+  </div>\n\
+</div>\n\
+\n\
+<div id="modalSpeedTest" class="modal" onclick="if(event.target===this)closeModal(\'modalSpeedTest\')">\n\
+  <div class="modal-inner" style="max-width:600px">\n\
+    <h2>\u26A1 \u6D4B\u901F\u7ED3\u679C</h2>\n\
+    <div id="speedTestBody"><div class="loading-text">\u6D4B\u901F\u4E2D...</div></div>\n\
+    <div class="modal-toolbar">\n\
+      <button class="btn" onclick="closeModal(\'modalSpeedTest\')" style="flex:1;justify-content:center">\u5173\u95ED</button>\n\
+    </div>\n\
+  </div>\n\
+</div>\n\
+\n\
+<script>\n\
+var allAliases = [];\n\
+var linesCache = {};\n\
+var currentLineAliasId = null;\n\
+\n\
+function showToast(msg) {\n\
+  var t = document.getElementById(\'toast\');\n\
+  t.textContent = msg;\n\
+  t.classList.add(\'show\');\n\
+  clearTimeout(t._timer);\n\
+  t._timer = setTimeout(function() { t.classList.remove(\'show\'); }, 3000);\n\
+}\n\
+\n\
+function closeModal(id) { document.getElementById(id).classList.remove(\'show\'); }\n\
+function openModal(id) { document.getElementById(id).classList.add(\'show\'); }\n\
+\n\
+function toggleDark() {\n\
+  document.body.classList.toggle(\'light\');\n\
+  var isLight = document.body.classList.contains(\'light\');\n\
+  try { localStorage.setItem(\'theme\', isLight ? \'light\' : \'dark\'); } catch(e) {}\n\
+}\n\
+\n\
+(function() {\n\
+  try {\n\
+    if (localStorage.getItem(\'theme\') === \'light\') document.body.classList.add(\'light\');\n\
+  } catch(e) {}\n\
+})();\n\
+\n\
+function logout() {\n\
+  document.cookie = \'admin_token=; path=/; max-age=0\';\n\
+  location.href = \'/\';\n\
+}\n\
+\n\
+function getModeLabel(mode) {\n\
+  return mode === \'dual\' ? \'\u517C\u5BB9\' : \'\u9ED8\u8BA4\';\n\
+}\n\
+\n\
+async function loadAliases() {\n\
+  try {\n\
+    var r = await fetch(\'/admin/api/aliases\');\n\
+    if (r.status === 401) { location.href = \'/\'; return; }\n\
+    allAliases = await r.json();\n\
+    renderAliases(allAliases);\n\
+  } catch(e) {\n\
+    document.getElementById(\'aliasList\').innerHTML = \'<div class="empty-state"><div class="empty-state-icon">\u26A0\uFE0F</div><div class="empty-state-text">\u52A0\u8F7D\u5931\u8D25: \' + e.message + \'</div></div>\';\n\
+  }\n\
+}\n\
+\n\
+function renderAliases(list) {\n\
+  var el = document.getElementById(\'aliasList\');\n\
+  if (!list.length) {\n\
+    el.innerHTML = \'<div class="empty-state"><div class="empty-state-icon">\u{1F4ED}</div><div class="empty-state-text">\u6682\u65E0\u522B\u540D\uFF0C\u70B9\u51FB\u4E0A\u65B9\u6309\u94AE\u6DFB\u52A0</div></div>\';\n\
+    return;\n\
+  }\n\
+  var html = \'<div class="alias-grid">\';\n\
+  list.forEach(function(a) {\n\
+    html += \'<div class="alias-card" data-search="\' + (a.name + \' \' + a.alias).toLowerCase() + \'">\';\n\
+    html += \'<div class="alias-card-header">\';\n\
+    var iconVal = a.icon || \'\u{1F3AC}\';\n\
+    var iconHtml = iconVal.startsWith(\'http\') ? \'<img src="\' + iconVal + \'" alt="icon" style="width:28px;height:28px;border-radius:4px;object-fit:cover">\' : iconVal;\n\
+    html += \'<div class="alias-icon">\' + iconHtml + \'</div>\';\n\
+    html += \'<div class="alias-info">\';\n\
+    html += \'<div class="alias-name">\' + a.name + \'</div>\';\n\
+    html += \'<div class="alias-path">/\' + a.alias + \'</div>\';\n\
+    html += \'</div>\';\n\
+    html += \'<div class="alias-actions">\';\n\
+    html += \'<button class="btn btn-ghost btn-sm" onclick="openEditAlias(\' + a.id + \')">\u7F16\u8F91</button>\';\n\
+    html += \'<button class="btn btn-danger btn-sm" onclick="deleteAlias(\' + a.id + \',\\\'\' + a.name.replace(/\'/g, "\\\\\'") + \'\\\')">\u5220\u9664</button>\';\n\
+    html += \'</div>\';\n\
+    html += \'</div>\';\n\
+    html += \'<div class="alias-card-body" id="lines-\' + a.id + \'">\';\n\
+    html += \'<div style="padding:16px;text-align:center;color:var(--text-sec);font-size:13px">\u52A0\u8F7D\u4E2D...</div>\';\n\
+    html += \'</div>\';\n\
+    html += \'<div class="alias-card-footer">\';\n\
+    html += \'<button class="btn btn-sm" onclick="openAddLine(\' + a.id + \')">\u2795 \u6DFB\u52A0\u7EBF\u8DEF</button>\';\n\
+    html += \'<button class="btn btn-ghost btn-sm" onclick="testLines(\' + a.id + \')">\u26A1 \u6D4B\u901F</button>\';\n\
+    html += \'</div>\';\n\
+    html += \'</div>\';\n\
+  });\n\
+  html += \'</div>\';\n\
+  el.innerHTML = html;\n\
+  list.forEach(function(a) { loadLines(a.id); });\n\
+}\n\
+\n\
+function filterAliases() {\n\
+  var q = document.getElementById(\'aliasSearch\').value.toLowerCase();\n\
+  document.querySelectorAll(\'.alias-card\').forEach(function(c) {\n\
+    c.style.display = (!q || c.dataset.search.indexOf(q) >= 0) ? \'\' : \'none\';\n\
+  });\n\
+}\n\
+\n\
+function openAddAlias() {\n\
+  document.getElementById(\'aliasId\').value = \'\';\n\
+  document.getElementById(\'aliasName\').value = \'\';\n\
+  document.getElementById(\'aliasPath\').value = \'\';\n\
+  setIconValue(\'\u{1F3AC}\');\n\
+  document.getElementById(\'aliasModalTitle\').textContent = \'\u6DFB\u52A0\u522B\u540D\';\n\
+  openModal(\'modalAlias\');\n\
+}\n\
+\n\
+function openEditAlias(id) {\n\
+  var a = allAliases.find(function(x) { return x.id === id; });\n\
+  if (!a) return;\n\
+  document.getElementById(\'aliasId\').value = a.id;\n\
+  document.getElementById(\'aliasName\').value = a.name;\n\
+  document.getElementById(\'aliasPath\').value = a.alias;\n\
+  setIconValue(a.icon || \'\u{1F3AC}\');\n\
+  document.getElementById(\'aliasModalTitle\').textContent = \'\u7F16\u8F91\u522B\u540D\';\n\
+  openModal(\'modalAlias\');\n\
+}\n\
+\n\
+var ICON_EMOJIS = [\n\
+  \'\u{1F3AC}\',\'\u{1F37F}\',\'\u{1F3AE}\',\'\u{1F3A8}\',\'\u{1F3B5}\',\'\u{1F3B6}\',\'\u{1F4FC}\',\'\u{1F4FA}\',\'\u{1F4F7}\',\'\u{1F4F9}\',\n\
+  \'\u{1F39E}\',\'\u{1F4BD}\',\'\u{1F4BB}\',\'\u{1F4F1}\',\'\u{1F4DF}\',\'\u{1F3A5}\',\'\u{1F4FB}\',\'\u{1F50A}\',\'\u{1F3B8}\',\'\u{1F3B9}\',\n\
+  \'\u{1F3BA}\',\'\u{1F3BB}\',\'\u{1F3BC}\',\'\u{2604}\',\'\u{1F3AD}\',\'\u{1F30A}\',\'\u{1F319}\',\'\u2B50\',\'\u{1F525}\',\'\u2728\',\n\
+  \'\u{1F496}\',\'\u{1F494}\',\'\u2764\uFE0F\',\'\u{1F48E}\',\'\u{1F680}\',\'\u2708\uFE0F\',\'\u{1F697}\',\'\u{1F3E0}\',\'\u{1F3F0}\',\'\u26EA\',\n\
+  \'\u{1F308}\',\'\u{1F306}\',\'\u{1F307}\',\'\u{1F305}\',\'\u{1F304}\',\'\u{1F303}\',\'\u{1F302}\',\'\u{1F301}\',\'\u{1F300}\',\'\u{1F30B}\',\n\
+  \'\u{1F30C}\',\'\u{1F30D}\',\'\u{1F30E}\',\'\u{1F30F}\',\'\u{1F310}\',\'\u{1F311}\',\'\u{1F312}\',\'\u{1F313}\',\'\u{1F314}\',\'\u{1F315}\',\n\
+  \'\u{1F4AF}\',\'\u{1F4AB}\',\'\u{1F4A5}\',\'\u{1F4A2}\',\'\u{1F4A4}\',\'\u{1F4A8}\',\'\u{1F4A6}\',\'\u{1F4AC}\',\'\u{1F4AD}\',\'\u{1F43E}\',\n\
+  \'\u{1F431}\',\'\u{1F439}\',\'\u{1F436}\',\'\u{1F42E}\',\'\u{1F43C}\',\'\u{1F43B}\',\'\u{1F428}\',\'\u{1F42F}\',\'\u{1F430}\',\'\u{1F43A}\',\n\
+  \'\u{1F353}\',\'\u{1F34E}\',\'\u{1F34A}\',\'\u{1F347}\',\'\u{1F352}\',\'\u{1F349}\',\'\u{1F345}\',\'\u{1F346}\',\'\u{1F344}\',\'\u{1F340}\',\n\
+  \'\u{1F370}\',\'\u{1F36D}\',\'\u{1F366}\',\'\u{1F36A}\',\'\u{1F37A}\',\'\u2615\',\'\u{1F375}\',\'\u{1F376}\',\'\u{1F37E}\',\'\u{1F377}\',\n\
+  \'\u{1F378}\',\'\u{1F379}\',\'\u{1F382}\',\'\u{1F381}\',\'\u{1F388}\',\'\u{1F389}\',\'\u{1F38A}\',\'\u{1F386}\',\'\u{1F384}\',\'\u{1F383}\',\n\
+  \'\u{1F3C0}\',\'\u26BD\',\'\u26BE\',\'\u{1F3C8}\',\'\u{1F3BE}\',\'\u{1F3CA}\',\'\u26F3\',\'\u{1F3D0}\',\'\u{1F3C9}\',\'\u{1F3B1}\',\n\
+  \'\u{1F52E}\',\'\u{1F48B}\',\'\u{1F489}\',\'\u{1F4DA}\',\'\u{1F4D6}\',\'\u{1F4DD}\',\'\u{1F4CB}\',\'\u{1F4C4}\',\'\u{1F4CA}\',\'\u{1F4C0}\',\n\
+  \'\u{1F514}\',\'\u{1F515}\',\'\u{1F513}\',\'\u{1F512}\',\'\u{1F511}\',\'\u{1F516}\',\'\u{1F517}\',\'\u{1F50D}\',\'\u{1F50E}\',\'\u{1F527}\',\n\
+  \'\u{1F528}\',\'\u{1F529}\',\'\u2699\uFE0F\',\'\u{1F6E0}\',\'\u{1F4E1}\',\'\u{1F4E0}\',\'\u{1F4E2}\',\'\u{1F4E3}\',\'\u{1F50B}\',\'\u{1F50C}\',\n\
+  \'\u26A1\',\'\u{1F4A1}\',\'\u{1F526}\',\'\u{1F31F}\',\'\u{1F4AB}\',\'\u{1F31A}\',\'\u{1F31D}\',\'\u{1F31E}\',\'\u{1F31B}\',\'\u{1F31C}\',\n\
+  \'\u2600\uFE0F\',\'\u26C5\',\'\u{1F324}\',\'\u{1F325}\',\'\u{1F326}\',\'\u{1F327}\',\'\u{1F328}\',\'\u{1F329}\',\'\u{1F32A}\',\'\u2744\uFE0F\'\n\
+];\n\
+var iconPickerLoaded = false;\n\
+var allIcons = [];\n\
+\n\
+function setIconValue(val) {\n\
+  document.getElementById(\'aliasIcon\').value = val;\n\
+  var cur = document.getElementById(\'iconPickerCurrent\');\n\
+  if (val && val.startsWith(\'http\')) {\n\
+    cur.innerHTML = \'<img src="\' + val + \'" alt="icon">\';\n\
+  } else {\n\
+    cur.textContent = val || \'\u{1F3AC}\';\n\
+  }\n\
+}\n\
+\n\
+async function loadIconPickerGrid() {\n\
+  var grid = document.getElementById(\'iconGrid\');\n\
+  if (iconPickerLoaded) { renderIconGrid(ICON_EMOJIS); return; }\n\
+  grid.innerHTML = \'<div class="loading-text">\u52A0\u8F7D\u4E2D...</div>\';\n\
+  try {\n\
+    var r = await fetch(\'/admin/api/icons\');\n\
+    if (r.ok) { var d = await r.json(); allIcons = d.icons || []; }\n\
+  } catch(e) { console.error(\'load icons fail\', e); }\n\
+  iconPickerLoaded = true;\n\
+  renderIconGrid(ICON_EMOJIS);\n\
+}\n\
+\n\
+function renderIconGrid(emojis, filter) {\n\
+  var grid = document.getElementById(\'iconGrid\');\n\
+  var curVal = document.getElementById(\'aliasIcon\').value;\n\
+  var f = (filter || \'\').toLowerCase();\n\
+  var html = \'\';\n\
+  html += \'<div class="icon-section-label">\u{1F3A8} \u9ED8\u8BA4\u56FE\u6807</div>\';\n\
+  emojis.forEach(function(e) {\n\
+    var sel = e === curVal ? \' selected\' : \'\';\n\
+    html += \'<div class="icon-item emoji-item\' + sel + \'" onclick="selectIcon(this.dataset.url)" data-url="\' + e + \'">\' + e + \'</div>\';\n\
+  });\n\
+  if (allIcons.length > 0) {\n\
+    html += \'<div class="icon-section-label">\u{1F5BC} Emby \u56FE\u6807\u5E93</div>\';\n\
+    allIcons.forEach(function(icon) {\n\
+      if (!f || icon.name.toLowerCase().indexOf(f) >= 0) {\n\
+        var sel = curVal === icon.url ? \' selected\' : \'\';\n\
+        html += \'<div class="icon-item\' + sel + \'" onclick="selectIcon(this.dataset.url)" data-url="\' + icon.url + \'" title="\' + icon.name + \'"><img src="\' + icon.url + \'" loading="lazy" alt="\' + icon.name + \'"></div>\';\n\
+      }\n\
+    });\n\
+  }\n\
+  if (html.indexOf(\'icon-item\') < 0) {\n\
+    html += \'<div style="grid-column:1/-1;text-align:center;color:var(--text-sec);padding:20px">\u672A\u627E\u5230\u5339\u914D\u7684\u56FE\u6807</div>\';\n\
+  }\n\
+  grid.innerHTML = html;\n\
+}\n\
+\n\
+function toggleIconPicker() {\n\
+  var panel = document.getElementById(\'iconPickerPanel\');\n\
+  var isOpen = panel.classList.contains(\'show\');\n\
+  if (isOpen) {\n\
+    panel.classList.remove(\'show\');\n\
+  } else {\n\
+    loadIconPickerGrid();\n\
+    panel.classList.add(\'show\');\n\
+    document.getElementById(\'iconSearchInput\').value = \'\';\n\
+    document.getElementById(\'iconSearchInput\').focus();\n\
+  }\n\
+}\n\
+\n\
+function filterIcons() {\n\
+  var q = document.getElementById(\'iconSearchInput\').value.toLowerCase().trim();\n\
+  if (!q) {\n\
+    renderIconGrid(ICON_EMOJIS);\n\
+    return;\n\
+  }\n\
+  var filtered = ICON_EMOJIS.filter(function(e) {\n\
+    return e.indexOf(q) >= 0;\n\
+  });\n\
+  renderIconGrid(filtered.length ? filtered : ICON_EMOJIS, q);\n\
+}\n\
+\n\
+function selectIcon(val) {\n\
+  setIconValue(val);\n\
+  document.getElementById(\'iconPickerPanel\').classList.remove(\'show\');\n\
+}\n\
+\n\
+function promptCustomIcon() {\n\
+  var url = prompt(\'\u8F93\u5165\u56FE\u7247URL\uFF08\u5C06\u663E\u793A\u4E3A\u56FE\u7247\u800C\u975Eemoji\uFF09:\', \n\
+    document.getElementById(\'aliasIcon\').value.startsWith(\'http\') ? document.getElementById(\'aliasIcon\').value : \'\');\n\
+  if (url !== null && url.trim()) {\n\
+    setIconValue(url.trim());\n\
+  }\n\
+}\n\
+\n\
+document.addEventListener(\'click\', function(e) {\n\
+  var panel = document.getElementById(\'iconPickerPanel\');\n\
+  if (!panel || !panel.classList.contains(\'show\')) return;\n\
+  var container = panel.closest(\'.icon-picker-container\');\n\
+  if (!container.contains(e.target)) {\n\
+    panel.classList.remove(\'show\');\n\
+  }\n\
+});\n\
+\n\
+async function saveAlias() {\n\
+  var id = document.getElementById(\'aliasId\').value;\n\
+  var body = {\n\
+    name: document.getElementById(\'aliasName\').value.trim(),\n\
+    alias: document.getElementById(\'aliasPath\').value.trim(),\n\
+    icon: document.getElementById(\'aliasIcon\').value.trim()\n\
+  };\n\
+  if (!body.name || !body.alias) { showToast(\'\u8BF7\u586B\u5199\u540D\u79F0\u548C\u8DEF\u5F84\'); return; }\n\
+  try {\n\
+    var r = await fetch(\'/admin/api/aliases\', {\n\
+      method: id ? \'PUT\' : \'POST\',\n\
+      headers: { \'Content-Type\': \'application/json\' },\n\
+      body: JSON.stringify(id ? Object.assign({}, body, { id: parseInt(id) }) : body)\n\
+    });\n\
+    if (r.status === 401) { location.href = \'/\'; return; }\n\
+    var j = await r.json();\n\
+    if (!r.ok) { showToast(j.error || \'\u64CD\u4F5C\u5931\u8D25\'); return; }\n\
+    closeModal(\'modalAlias\');\n\
+    showToast(id ? \'\u522B\u540D\u5DF2\u66F4\u65B0\' : \'\u522B\u540D\u5DF2\u521B\u5EFA\');\n\
+    loadAliases();\n\
+  } catch(e) { showToast(\'\u8BF7\u6C42\u5931\u8D25: \' + e.message); }\n\
+}\n\
+\n\
+async function deleteAlias(id, name) {\n\
+  if (!confirm(\'\u786E\u5B9A\u5220\u9664\u522B\u540D "\' + name + \'" \u53CA\u5176\u6240\u6709\u7EBF\u8DEF\uFF1F\u6B64\u64CD\u4F5C\u4E0D\u53EF\u6062\u590D\u3002\')) return;\n\
+  try {\n\
+    var r = await fetch(\'/admin/api/aliases?id=\' + id, { method: \'DELETE\' });\n\
+    if (r.status === 401) { location.href = \'/\'; return; }\n\
+    showToast(\'\u522B\u540D\u5DF2\u5220\u9664\');\n\
+    loadAliases();\n\
+  } catch(e) { showToast(\'\u5220\u9664\u5931\u8D25\'); }\n\
+}\n\
+\n\
+async function loadLines(aliasId) {\n\
+  var el = document.getElementById(\'lines-\' + aliasId);\n\
+  try {\n\
+    var r = await fetch(\'/admin/api/lines?alias_id=\' + aliasId);\n\
+    if (r.status === 401) { location.href = \'/\'; return; }\n\
+    var lines = await r.json();\n\
+    lines.forEach(function(l) { linesCache[l.id] = l; });\n\
+    if (!lines.length) {\n\
+      el.innerHTML = \'<div style="padding:16px;text-align:center;color:var(--text-sec);font-size:13px">\u6682\u65E0\u7EBF\u8DEF\uFF0C\u70B9\u51FB\u4E0B\u65B9\u6309\u94AE\u6DFB\u52A0</div>\';\n\
+      return;\n\
+    }\n\
+    var html = \'<table><thead><tr><th>\u7EBF\u8DEF\u540D\u79F0</th><th>\u76EE\u6807\u5730\u5740</th><th>\u6A21\u5F0F</th><th>\u64CD\u4F5C</th></tr></thead><tbody>\';\n\
+    lines.forEach(function(l) {\n\
+      html += \'<tr>\';\n\
+      html += \'<td>\' + l.line_name + \'</td>\';\n\
+      html += \'<td><code>\' + l.target_url + \'</code></td>\';\n\
+      html += \'<td><span class="tag tag-\' + (l.mode || \'off\') + \'">\' + getModeLabel(l.mode) + \'</span></td>\';\n\
+      html += \'<td style="white-space:nowrap">\';\n\
+      html += \'<button class="btn btn-ghost btn-sm" onclick="openEditLine(\' + l.id + \',\' + aliasId + \')">\u7F16\u8F91</button> \';\n\
+      html += \'<button class="btn btn-danger btn-sm" onclick="deleteLine(\' + l.id + \',\' + aliasId + \')">\u5220\u9664</button>\';\n\
+      html += \'</td></tr>\';\n\
+    });\n\
+    html += \'</tbody></table>\';\n\
+    el.innerHTML = html;\n\
+  } catch(e) {\n\
+    el.innerHTML = \'<div style="padding:16px;text-align:center;color:var(--text-sec);font-size:13px">\u52A0\u8F7D\u5931\u8D25</div>\';\n\
+  }\n\
+}\n\
+\n\
+function openAddLine(aliasId) {\n\
+  document.getElementById(\'lineAliasId\').value = aliasId;\n\
+  document.getElementById(\'lineId\').value = \'\';\n\
+  document.getElementById(\'lineName\').value = \'\';\n\
+  document.getElementById(\'lineTargetUrl\').value = \'\';\n\
+  document.getElementById(\'lineCompat\').checked = false;\n\
+  document.getElementById(\'lineCache\').checked = false;\n\
+  document.getElementById(\'lineModalTitle\').textContent = \'\u6DFB\u52A0\u7EBF\u8DEF\';\n\
+  openModal(\'modalLine\');\n\
+}\n\
+\n\
+function openEditLine(lineId, aliasId) {\n\
+  var l = linesCache[lineId];\n\
+  if (!l) return;\n\
+  document.getElementById(\'lineAliasId\').value = aliasId;\n\
+  document.getElementById(\'lineId\').value = l.id;\n\
+  document.getElementById(\'lineName\').value = l.line_name;\n\
+  document.getElementById(\'lineTargetUrl\').value = l.target_url;\n\
+  document.getElementById(\'lineCompat\').checked = (l.mode === \'dual\');\n\
+  document.getElementById(\'lineCache\').checked = !!l.cache_img;\n\
+  document.getElementById(\'lineModalTitle\').textContent = \'\u7F16\u8F91\u7EBF\u8DEF\';\n\
+  openModal(\'modalLine\');\n\
+}\n\
+\n\
+async function saveLine() {\n\
+  var id = document.getElementById(\'lineId\').value;\n\
+  var aliasId = parseInt(document.getElementById(\'lineAliasId\').value);\n\
+  var body = {\n\
+    alias_id: aliasId,\n\
+    line_name: document.getElementById(\'lineName\').value.trim(),\n\
+    target_url: document.getElementById(\'lineTargetUrl\').value.trim(),\n\
+    mode: document.getElementById(\'lineCompat\').checked ? \'dual\' : \'off\',\n\
+    cache_img: document.getElementById(\'lineCache\').checked ? 1 : 0\n\
+  };\n\
+  if (!body.line_name || !body.target_url) { showToast(\'\u8BF7\u586B\u5199\u7EBF\u8DEF\u540D\u79F0\u548C\u76EE\u6807\u5730\u5740\'); return; }\n\
+  try {\n\
+    var r = await fetch(\'/admin/api/lines\', {\n\
+      method: id ? \'PUT\' : \'POST\',\n\
+      headers: { \'Content-Type\': \'application/json\' },\n\
+      body: JSON.stringify(id ? Object.assign({}, body, { id: parseInt(id) }) : body)\n\
+    });\n\
+    if (r.status === 401) { location.href = \'/\'; return; }\n\
+    if (!r.ok) { showToast((await r.json()).error || \'\u4FDD\u5B58\u5931\u8D25\'); return; }\n\
+    closeModal(\'modalLine\');\n\
+    showToast(id ? \'\u7EBF\u8DEF\u5DF2\u66F4\u65B0\' : \'\u7EBF\u8DEF\u5DF2\u6DFB\u52A0\');\n\
+    loadLines(aliasId);\n\
+  } catch(e) { showToast(\'\u8BF7\u6C42\u5931\u8D25: \' + e.message); }\n\
+}\n\
+\n\
+async function deleteLine(lineId, aliasId) {\n\
+  if (!confirm(\'\u786E\u5B9A\u5220\u9664\u8BE5\u7EBF\u8DEF\uFF1F\')) return;\n\
+  try {\n\
+    var r = await fetch(\'/admin/api/lines?id=\' + lineId, { method: \'DELETE\' });\n\
+    if (r.status === 401) { location.href = \'/\'; return; }\n\
+    showToast(\'\u7EBF\u8DEF\u5DF2\u5220\u9664\');\n\
+    loadLines(aliasId);\n\
+  } catch(e) { showToast(\'\u5220\u9664\u5931\u8D25\'); }\n\
+}\n\
+\n\
+function getSpeedTagClass(status) {\n\
+  return \'tag-\' + (status || \'off\');\n\
+}\n\
+\n\
+function getSpeedStatusLabel(status) {\n\
+  var map = { fast: \'\u6781\u5FEB\', good: \'\u826F\u597D\', slow: \'\u8F83\u6162\', timeout: \'\u8D85\u65F6\' };\n\
+  return map[status] || \'\u2014\';\n\
+}\n\
+\n\
+function getSpeedDotClass(status) {\n\
+  var map = { fast: \'fast\', good: \'good\', slow: \'slow\', timeout: \'timeout\' };\n\
+  return map[status] || \'timeout\';\n\
+}\n\
+\n\
+async function testLines(aliasId) {\n\
+  openModal(\'modalSpeedTest\');\n\
+  var body = document.getElementById(\'speedTestBody\');\n\
+  body.innerHTML = \'<div class="loading-text">\u6B63\u5728\u6D4B\u901F\u7EBF\u8DEF...</div>\';\n\
+  try {\n\
+    var r = await fetch(\'/admin/api/speedtest/lines?alias_id=\' + aliasId, { method: \'POST\' });\n\
+    if (r.status === 401) { location.href = \'/\'; return; }\n\
+    var d = await r.json();\n\
+    if (!d.results || !d.results.length) {\n\
+      body.innerHTML = \'<div class="domain-no-result">\u65E0\u6D4B\u901F\u7ED3\u679C</div>\';\n\
+      return;\n\
+    }\n\
+    var best = d.best || null;\n\
+    var html = \'<table class="result-table"><thead><tr><th>\u7EBF\u8DEF</th><th>\u5EF6\u8FDF</th><th>\u72B6\u6001</th></tr></thead><tbody>\';\n\
+    d.results.forEach(function(x) {\n\
+      var isBest = best && best === x.id;\n\
+      html += \'<tr\' + (isBest ? \' class="best"\' : \'\') + \'>\';\n\
+      html += \'<td>\' + (x.line_name || x.name || \'\u2014\') + \'</td>\';\n\
+      html += \'<td>\' + (x.latency >= 0 ? x.latency + \' ms\' : \'\u2014\') + \'</td>\';\n\
+      html += \'<td><span class="status-dot \' + getSpeedDotClass(x.status) + \'"></span>\' + getSpeedStatusLabel(x.status) + \'</td>\';\n\
+      html += \'</tr>\';\n\
+    });\n\
+    html += \'</tbody></table>\';\n\
+    body.innerHTML = html;\n\
+    showToast(\'\u6D4B\u901F\u5B8C\u6210\');\n\
+    loadLines(aliasId);\n\
+  } catch(e) {\n\
+    body.innerHTML = \'<div class="domain-no-result">\u6D4B\u901F\u5931\u8D25: \' + e.message + \'</div>\';\n\
+  }\n\
+}\n\
+\n\
+async function testDomains() {\n\
+  var el = document.getElementById(\'domainResult\');\n\
+  el.innerHTML = \'<div class="loading-text">\u6B63\u5728\u4ECE\u8FB9\u7F18\u8282\u70B9\u6D4B\u901F...</div>\';\n\
+  try {\n\
+    var r = await fetch(\'/admin/api/speedtest/domains\', { method: \'POST\' });\n\
+    if (r.status === 401) { location.href = \'/\'; return; }\n\
+    var d = await r.json();\n\
+    if (!d.results || !d.results.length) {\n\
+      el.innerHTML = \'<div class="domain-no-result">\u65E0\u6D4B\u901F\u7ED3\u679C</div>\';\n\
+      return;\n\
+    }\n\
+    var html = \'<table class="result-table"><thead><tr><th>\u540D\u79F0</th><th>\u57DF\u540D</th><th>\u5EF6\u8FDF</th><th>\u72B6\u6001</th></tr></thead><tbody>\';\n\
+    d.results.forEach(function(x) {\n\
+      var isBest = d.best && d.best === x.host;\n\
+      html += \'<tr\' + (isBest ? \' class="best"\' : \'\') + \'>\';\n\
+      html += \'<td>\' + (x.name || \'\u2014\') + \'</td>\';\n\
+      html += \'<td><code>\' + x.host + \'</code></td>\';\n\
+      html += \'<td>\' + (x.latency >= 0 ? x.latency + \' ms\' : \'\u2014\') + \'</td>\';\n\
+      html += \'<td><span class="status-dot \' + getSpeedDotClass(x.status) + \'"></span>\' + getSpeedStatusLabel(x.status) + \'</td>\';\n\
+      html += \'</tr>\';\n\
+    });\n\
+    html += \'</tbody></table>\';\n\
+    if (d.best) {\n\
+      html += \'<div class="domain-best">\u{1F449} \u63A8\u8350\u4F7F\u7528: <code>\' + d.best + \'</code></div>\';\n\
+    }\n\
+    el.innerHTML = html;\n\
+    showToast(\'\u6D4B\u901F\u5B8C\u6210\');\n\
+  } catch(e) {\n\
+    el.innerHTML = \'<div class="domain-no-result">\u6D4B\u901F\u5931\u8D25: \' + e.message + \'</div>\';\n\
+  }\n\
+}\n\
+\n\
+loadAliases();\n\
+<\/script>\n\
+</body>\n\
+</html>';
+
+
+
+
+const FRONTEND_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Emby 反向代理服务</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; color: #e1e4e8; background: #1a1c22; min-height: 100vh; -webkit-font-smoothing: antialiased; }
+        .container { max-width: 900px; margin: auto; padding: 20px; display: flex; flex-direction: column; gap: 20px; }
+        .card { background: #252830; padding: 28px; border-radius: 16px; border-top: 4px solid #0070f3; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        h1 { margin-top: 0; color: #0070f3; font-size: 1.6em; }
+        h2 { color: #0070f3; border-bottom: 2px solid #3e4451; padding-bottom: 8px; font-size: 1.1em; margin-bottom: 16px; }
+        code { background: rgba(0,112,243,0.1); padding: 3px 8px; border-radius: 4px; color: #61afef; word-break: break-all; font-size: 0.9em; }
+        .muted { color: #abb2bf; font-size: 14px; }
+        a { color: #0070f3; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .btn { display: inline-block; padding: 10px 18px; background: #0070f3; color: #fff; border-radius: 8px; text-decoration: none; font-weight: 600; border: none; cursor: pointer; font-size: 14px; transition: background 0.2s; }
+        .btn:hover { background: #0056b3; text-decoration: none; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-outline { background: transparent; border: 1px solid #0070f3; color: #0070f3; }
+        .btn-outline:hover { background: rgba(0,112,243,0.1); }
+        .hero { text-align: center; padding: 40px 28px; }
+        .hero h1 { font-size: 2em; margin-bottom: 12px; }
+        .hero p { color: #8b8fa3; font-size: 16px; max-width: 600px; margin: 0 auto; }
+        .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin: 16px 0; }
+        .info-item { background: rgba(0,0,0,0.2); padding: 16px; border-radius: 10px; border-left: 3px solid #0070f3; }
+        .info-label { font-size: 12px; color: #8b8fa3; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+        .info-value { font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace; font-size: 14px; color: #61afef; word-break: break-all; }
+        .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
+        .stat-card { flex: 1; min-width: 140px; background: rgba(0,112,243,0.08); border: 1px solid rgba(0,112,243,0.2); border-radius: 10px; padding: 16px; text-align: center; }
+        .stat-val { font-size: 1.8em; font-weight: bold; color: #0070f3; }
+        .stat-label { font-size: 13px; color: #8b8fa3; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #3e4451; }
+        th { color: #0070f3; background: rgba(0,112,243,0.08); font-weight: 600; }
+        tr.best td { background: rgba(52,199,89,0.08); }
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+        .tag-fast { background: rgba(52,199,89,0.2); color: #34c759; }
+        .tag-good { background: rgba(0,112,243,0.2); color: #61afef; }
+        .tag-slow { background: rgba(255,149,0,0.2); color: #ff9500; }
+        .tag-timeout { background: rgba(224,108,117,0.2); color: #e06c75; }
+        .warn { border: 2px solid rgba(224,108,117,0.3); padding: 16px; border-radius: 12px; color: #e06c75; background: rgba(224,108,117,0.05); }
+        .example-box { background: #1a1c22; border: 1px solid #3e4451; border-radius: 8px; padding: 14px; margin: 10px 0; font-family: monospace; font-size: 13px; overflow-x: auto; }
+        .section-desc { color: #8b8fa3; font-size: 14px; margin-bottom: 16px; }
+        .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+        footer { text-align: center; padding: 30px 20px; color: #555a6e; font-size: 13px; }
+        footer a { color: #0088cc; }
+        #toast { position: fixed; top: 24px; left: 50%; transform: translateX(-50%) translateY(-80px); background: #252830; color: #e1e4e8; padding: 12px 24px; border-radius: 10px; font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); border: 1px solid #3e4451; z-index: 9999; opacity: 0; transition: transform 0.3s ease, opacity 0.3s ease; pointer-events: none; }
+        #toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+        @media (max-width: 600px) {
+            .container { padding: 12px; }
+            .card { padding: 20px; }
+            .hero { padding: 28px 20px; }
+            .hero h1 { font-size: 1.5em; }
+            .info-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div id="toast"></div>
+    <div class="container">
+
+        <div class="card hero">
+            <h1>\u{1F680} Emby 反向代理服务</h1>
+            <p>基于 Cloudflare Workers 的智能反向代理，支持别名管理、多线路故障转移与 CF 优选域名智能测速</p>
+            <div style="margin-top:18px">
+                <a href="/admin" class="btn btn-outline">\u{1F510} 管理后台</a>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>\u{1F4F1} 当前连接信息</h2>
+            <div class="info-grid">
+                <div class="info-item">
+                    <div class="info-label">当前接入域名</div>
+                    <div class="info-value" id="conn-host">加载中...</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">边缘节点</div>
+                    <div class="info-value" id="conn-edge">加载中...</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">运营商</div>
+                    <div class="info-value" id="conn-isp">加载中...</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">推荐优选域名</div>
+                    <div class="info-value" id="conn-best">加载中...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>\u{1F4D6} 使用指南</h2>
+            <p class="section-desc">通过本代理访问 Emby 服务，支持直接 URL 和别名两种方式：</p>
+
+            <h3 style="color:#61afef;font-size:14px;margin:16px 0 8px">通用格式（直接 URL）</h3>
+            <div class="example-box">
+                <div style="color:#8b8fa3;margin-bottom:6px">// HTTP 服务</div>
+                <div>https://<span style="color:#34c759">代理域名</span>/http://你的emby地址:端口</div>
+                <div style="color:#8b8fa3;margin:12px 0 6px">// HTTPS 服务</div>
+                <div>https://<span style="color:#34c759">代理域名</span>/https://你的emby地址:端口</div>
+            </div>
+
+            <h3 style="color:#61afef;font-size:14px;margin:16px 0 8px">实际示例</h3>
+            <div class="example-box">
+                <div>https://proxy.example.com/http://192.168.1.100:8096</div>
+                <div style="margin-top:6px">https://proxy.example.com/https://emby.mydomain.com:8920</div>
+            </div>
+
+            <div class="warn" style="margin-top:16px">
+                \u{26A0}\u{FE0F} 使用前请先手动测试代理地址是否可用，确认能正常访问后再配置到客户端。恶意刷接口将被封禁 IP。
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>\u{1F517} 别名快捷方式</h2>
+            <p class="section-desc">管理员可在后台配置别名，简化访问路径：</p>
+
+            <div class="example-box">
+                <div style="color:#8b8fa3;margin-bottom:6px">// 通过别名访问（更简短）</div>
+                <div>https://proxy.example.com/<span style="color:#34c759">别名</span></div>
+                <div style="margin-top:6px">https://proxy.example.com/<span style="color:#34c759">别名</span>/web/index.html</div>
+            </div>
+
+            <p class="muted" style="margin-top:12px">别名由管理员在 <a href="/admin">管理后台</a> 中配置，支持多线路故障转移与智能选线。</p>
+        </div>
+
+        <div class="card">
+            <h2>\u{1F4CA} 使用统计</h2>
+            <div id="stats-loading" class="muted">加载中...</div>
+            <div id="stats-body" style="display:none">
+                <div class="stat-row">
+                    <div class="stat-card">
+                        <div class="stat-val" id="st-play">0</div>
+                        <div class="stat-label">播放次数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-val" id="st-pb">0</div>
+                        <div class="stat-label">获取链接</div>
+                    </div>
+                </div>
+                <div id="daily-table"></div>
+                <p class="muted" style="margin-top:12px" id="stats-time"></p>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>\u{26A1} 优选域名测速</h2>
+            <p class="section-desc">测试各 Cloudflare 优选域名到您网络的延迟，选择最快的接入点：</p>
+            <div class="toolbar">
+                <button class="btn" id="btn-speedtest" onclick="runDomainSpeedtest()">开始测速</button>
+                <span class="muted" id="speed-status"></span>
+            </div>
+            <div id="domain-table-wrap">
+                <p class="muted" id="domain-hint">点击上方按钮开始测速</p>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>Emby 反向代理服务 &copy; 2024-2026 &nbsp;|&nbsp; <a href="https://t.me/emby_proxy" target="_blank">Telegram 群组</a></p>
+        <p style="margin-top:4px;font-size:12px;color:#444a5e">Powered by Cloudflare Workers</p>
+    </footer>
+
+    <script>
+        var OPT_DOMAINS = [];
+        var TAG_MAP = { fast: '\u{1F680} 极快', good: '\u{1F44D} 良好', slow: '\u{1F40C} 较慢', timeout: '\u{274C} 超时' };
+        var CLS_MAP = { fast: 'tag-fast', good: 'tag-good', slow: 'tag-slow', timeout: 'tag-timeout' };
+
+        function showToast(msg) {
+            var t = document.getElementById('toast');
+            t.textContent = msg;
+            t.classList.add('show');
+            setTimeout(function() { t.classList.remove('show'); }, 2500);
+        }
+
+        async function loadConnectionInfo() {
+            document.getElementById('conn-host').textContent = window.location.host;
+            try {
+                var r = await fetch('/api/connection-info');
+                var d = await r.json();
+                var parts = [];
+                if (d.colo && d.colo !== 'Unknown') parts.push(d.colo);
+                if (d.country && d.country !== 'Unknown') parts.push(d.country);
+                if (d.region) parts.push(d.region);
+                if (d.city) parts.push(d.city);
+                document.getElementById('conn-edge').textContent = parts.join(' / ') || '\u2014';
+                document.getElementById('conn-isp').textContent = d.isp || d.asn || '\u2014';
+            } catch(e) {
+                document.getElementById('conn-edge').textContent = '\u2014';
+                document.getElementById('conn-isp').textContent = '\u2014';
+            }
+            try {
+                var r2 = await fetch('/api/best-domain');
+                var d2 = await r2.json();
+                if (d2.best) {
+                    var bestText = d2.best;
+                    if (d2.bestName) bestText = d2.bestName + ' (' + d2.best + ')';
+                    if (d2.region || d2.isp) bestText += ' [' + [d2.region, d2.isp].filter(Boolean).join(' ') + ']';
+                    if (d2.cached) bestText += ' [cached]';
+                    document.getElementById('conn-best').textContent = bestText;
+                } else {
+                    document.getElementById('conn-best').textContent = d2.message || '\u2014';
+                }
+            } catch(e) {
+                document.getElementById('conn-best').textContent = '\u2014';
+            }
+        }
+
+        async function loadStats() {
+            try {
+                var r = await fetch('/stats');
+                var data = await r.json();
+                if (data.error) {
+                    document.getElementById('stats-loading').textContent = data.error;
+                    return;
+                }
+                document.getElementById('stats-loading').style.display = 'none';
+                document.getElementById('stats-body').style.display = 'block';
+                document.getElementById('st-play').textContent = data.data.total.playing;
+                document.getElementById('st-pb').textContent = data.data.total.playbackInfo;
+                if (data.data.lastUpdated) {
+                    document.getElementById('stats-time').textContent = '\u{1F504} 数据更新时间: ' + data.data.lastUpdated;
+                }
+                var daily = (data.data.dailyStats || []).slice(0, 10);
+                if (daily.length) {
+                    var t = '<table><tr><th>日期</th><th>播放次数</th><th>获取链接</th></tr>';
+                    daily.forEach(function(s) {
+                        t += '<tr><td>' + s.date + '</td><td>' + s.playing_count + '</td><td>' + s.playback_info_count + '</td></tr>';
+                    });
+                    document.getElementById('daily-table').innerHTML = t + '</table>';
+                }
+            } catch(e) {
+                document.getElementById('stats-loading').textContent = '\u{26A0}\u{FE0F} 统计数据加载失败';
+            }
+        }
+
+        function pingUrl(url, timeout) {
+            return new Promise(function(resolve) {
+                var t0 = performance.now();
+                var timer = setTimeout(function() { resolve(-1); }, timeout || 7000);
+                var done = function(ms) {
+                    clearTimeout(timer);
+                    resolve(ms >= 0 && ms < (timeout || 7000) ? ms : -1);
+                };
+                fetch(url, { mode: 'no-cors', cache: 'no-store', credentials: 'omit' })
+                    .then(function() { done(Math.round(performance.now() - t0)); })
+                    .catch(function() {
+                        var img = new Image();
+                        var t1 = performance.now();
+                        var t2 = setTimeout(function() { done(-1); }, 5000);
+                        var end = function() { clearTimeout(t2); done(Math.round(performance.now() - t1)); };
+                        img.onload = end;
+                        img.onerror = end;
+                        img.src = url + (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
+                    });
+            });
+        }
+
+        async function probeDomain(item) {
+            var host = item.subdomain + '.' + item.domain;
+            var paths = ['/cdn-cgi/trace', '/favicon.ico', '/'];
+            for (var i = 0; i < paths.length; i++) {
+                var ms = await pingUrl('https://' + host + paths[i], 7000);
+                if (ms >= 0) {
+                    var status = ms < 100 ? 'fast' : ms < 300 ? 'good' : 'slow';
+                    return { subdomain: item.subdomain, domain: item.domain, name: item.name, host: host, latency: ms, status: status };
+                }
+            }
+            return { subdomain: item.subdomain, domain: item.domain, name: item.name, host: host, latency: -1, status: 'timeout' };
+        }
+
+        async function serverSpeedTest() {
+            var r = await fetch('/api/speedtest/domains', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+            return await r.json();
+        }
+
+        function renderDomainTable(results, best) {
+            var wrap = document.getElementById('domain-table-wrap');
+            if (!results.length) { wrap.innerHTML = '<p class="muted">无测速数据</p>'; return; }
+            var h = '<table><thead><tr><th>#</th><th>名称</th><th>域名</th><th>延迟</th><th>状态</th></tr></thead><tbody>';
+            results.forEach(function(r, i) {
+                var host = r.host || (r.subdomain + '.' + r.domain);
+                var isBest = best && best === host;
+                h += '<tr' + (isBest ? ' class="best"' : '') + '><td>' + (i + 1) + '</td><td>' + (r.name || '') + '</td><td><code>' + host + '</code></td>' +
+                    '<td>' + (r.latency >= 0 ? r.latency + ' ms' : '\u2014') + '</td>' +
+                    '<td><span class="tag ' + (CLS_MAP[r.status] || 'tag-timeout') + '">' + (TAG_MAP[r.status] || '\u2014') + '</span></td></tr>';
+            });
+            wrap.innerHTML = h + '</tbody></table>';
+        }
+
+        async function runDomainSpeedtest() {
+            var btn = document.getElementById('btn-speedtest');
+            var status = document.getElementById('speed-status');
+            btn.disabled = true;
+            btn.textContent = '测速中...';
+            status.textContent = '正在加载域名列表...';
+            document.getElementById('domain-table-wrap').innerHTML = '<p class="muted">\u{1F680} 测速中，请稍候...</p>';
+
+            try {
+                if (!OPT_DOMAINS.length) {
+                    var ld = await serverSpeedTest();
+                    OPT_DOMAINS = (ld.results || []).map(function(r) {
+                        return { subdomain: r.subdomain, domain: r.domain, name: r.name };
+                    });
+                    if (!OPT_DOMAINS.length && typeof OPTIMIZED_DOMAINS !== 'undefined') {
+                        OPT_DOMAINS = OPTIMIZED_DOMAINS;
+                    }
+                }
+            } catch(e) {}
+
+            if (!OPT_DOMAINS.length) {
+                status.textContent = '无法获取域名列表';
+                btn.disabled = false;
+                btn.textContent = '开始测速';
+                return;
+            }
+
+            status.textContent = '正在测速 (' + OPT_DOMAINS.length + ' 个域名)...';
+            var results = [];
+            var completed = 0;
+
+            var promises = OPT_DOMAINS.map(function(item) {
+                return probeDomain(item).then(function(r) {
+                    results.push(r);
+                    completed++;
+                    status.textContent = '测速中... ' + completed + '/' + OPT_DOMAINS.length;
+                });
+            });
+
+            await Promise.all(promises);
+
+            var timeoutResults = results.filter(function(r) { return r.latency < 0; });
+            if (timeoutResults.length > 0) {
+                status.textContent = '正在从服务器获取备用数据...';
+                try {
+                    var sd = await serverSpeedTest();
+                    var serverResults = sd.results || [];
+                    timeoutResults.forEach(function(tr) {
+                        var found = serverResults.find(function(x) { return x.host === tr.host && x.latency >= 0; });
+                        if (found) {
+                            tr.latency = found.latency;
+                            tr.status = found.status;
+                        }
+                    });
+                } catch(e) {}
+            }
+
+            results.sort(function(a, b) {
+                if (a.latency < 0) return 1;
+                if (b.latency < 0) return -1;
+                return a.latency - b.latency;
+            });
+
+            var best = results.find(function(r) { return r.latency >= 0; });
+            renderDomainTable(results, best ? best.host : null);
+
+            var okCount = results.filter(function(r) { return r.latency >= 0; }).length;
+            status.textContent = '\u{2705} 测速完成 (' + okCount + '/' + OPT_DOMAINS.length + ' 可用)';
+            if (best) status.textContent += ' \u{00B7} 推荐: ' + best.host;
+
+            btn.disabled = false;
+            btn.textContent = '重新测速';
+        }
+
+        loadConnectionInfo();
+        loadStats();
+        setInterval(loadStats, 3600000);
+    </script>
+</body>
+</html>`;
+
+async function initDB(env) {
+    try {
+        await env.DB.exec(`
+            CREATE TABLE IF NOT EXISTS auto_emby_daily_stats (
+                date TEXT PRIMARY KEY,
+                playing_count INTEGER DEFAULT 0,
+                playback_info_count INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alias TEXT UNIQUE NOT NULL,
+                name TEXT DEFAULT '',
+                icon TEXT DEFAULT '\u{1F3AC}',
+                sort_order INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now', '+8 hours'))
+            );
+            CREATE TABLE IF NOT EXISTS alias_lines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alias_id INTEGER NOT NULL,
+                target_url TEXT NOT NULL,
+                line_name TEXT DEFAULT '',
+                mode TEXT DEFAULT 'off',
+                cache_img INTEGER DEFAULT 0,
+                sort_order INTEGER DEFAULT 0,
+                FOREIGN KEY (alias_id) REFERENCES aliases(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS speedtest_cache (
+                cache_key TEXT PRIMARY KEY,
+                best_domain TEXT,
+                results TEXT,
+                updated_at TEXT DEFAULT (datetime('now', '+8 hours'))
+            );
+        `);
+        return true;
+    } catch (e) {
+        console.error('DB init error:', e.message);
+        return false;
+    }
+}
+
+function getAdminToken(request) {
+    const cookie = request.headers.get('Cookie') || '';
+    const match = cookie.match(/admin_token=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : null;
 }
 
 function isAdmin(request, env) {
-  const expected = getAdminToken(env);
-  if (!expected) return false;
-  const provided = getCookie(request, 'admin_token');
-  return provided === expected;
+    if (!env.ADMIN_TOKEN) return true;
+    const token = getAdminToken(request);
+    return token && token === env.ADMIN_TOKEN;
 }
 
-function adminLoginResponse(request, env, tokenFromUser) {
-  const expected = getAdminToken(env);
-  if (!expected) {
-    return json({
-      ok: false,
-      error: 'Worker 未读到 ADMIN_TOKEN。请在 Cloudflare 控制台 → Worker → 设置 → 变量和机密 中添加 ADMIN_TOKEN。',
-    }, 503);
-  }
-  if (tokenFromUser !== expected) {
-    return json({ ok: false, error: '密钥错误' }, 401);
-  }
-  const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-  const cookie = `admin_token=${encodeURIComponent(expected)}; Path=/; Max-Age=2592000; SameSite=Lax${secure}`;
-  return new Response(JSON.stringify({ ok: true }), {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Set-Cookie': cookie,
-      'Cache-Control': 'no-store',
-    },
-  });
-}
-
-function getClientCacheKey(request) {
-  const ip = request.headers.get('cf-connecting-ip') || '0.0.0.0';
-  const cf = request.cf || {};
-  let ipKey = ip;
-  if (ip.includes('.')) ipKey = ip.split('.').slice(0, 3).join('.');
-  else if (ip.includes(':')) ipKey = ip.split(':').slice(0, 4).join(':');
-  return `${cf.country || 'XX'}|${cf.city || ''}|${cf.asn || ''}|${ipKey}`;
-}
-
-function optimizedHost(item) {
-  return `${item.subdomain}.${item.domain}`;
-}
-
-function latencyStatus(ms) {
-  if (ms < 0) return 'timeout';
-  if (ms < 100) return 'fast';
-  if (ms < 300) return 'good';
-  return 'slow';
-}
-
-async function initDatabase(env) {
-  if (!env.DB || dbReady) return;
-  await env.DB.batch([
-    env.DB.prepare(`CREATE TABLE IF NOT EXISTS routes (
-      prefix TEXT PRIMARY KEY, target TEXT NOT NULL,
-      remark TEXT DEFAULT '', last_play TEXT DEFAULT '',
-      cache_img TEXT DEFAULT 'on', compat_mode TEXT DEFAULT 'off',
-      sort_order INTEGER DEFAULT 0, target_latencies TEXT DEFAULT '')`),
-    env.DB.prepare(`CREATE TABLE IF NOT EXISTS visitor_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, prefix TEXT,
-      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, ip TEXT, country TEXT, ua TEXT)`),
-    env.DB.prepare(`CREATE TABLE IF NOT EXISTS request_stats (
-      prefix TEXT, date TEXT, count INTEGER DEFAULT 0, PRIMARY KEY(prefix, date))`),
-    env.DB.prepare(`CREATE TABLE IF NOT EXISTS auto_emby_daily_stats (
-      date TEXT PRIMARY KEY, playing_count INTEGER DEFAULT 0, playback_info_count INTEGER DEFAULT 0)`),
-    env.DB.prepare(`CREATE TABLE IF NOT EXISTS domain_speed_cache (
-      cache_key TEXT NOT NULL, subdomain TEXT NOT NULL, domain TEXT NOT NULL,
-      display_name TEXT, latency_ms INTEGER DEFAULT -1, status TEXT DEFAULT 'unknown',
-      tested_at INTEGER NOT NULL, PRIMARY KEY (cache_key, subdomain, domain))`),
-    env.DB.prepare(`CREATE TABLE IF NOT EXISTS domain_best_cache (
-      cache_key TEXT PRIMARY KEY, best_host TEXT, best_name TEXT, best_latency INTEGER,
-      tested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`),
-  ]);
-  try { await env.DB.exec(`ALTER TABLE routes ADD COLUMN target_latencies TEXT DEFAULT ''`); } catch(e) {}
-  try { await env.DB.exec(`ALTER TABLE routes ADD COLUMN compat_mode TEXT DEFAULT 'off'`); } catch(e) {}
-  dbReady = true;
-}
-
-async function getEdgeInfo(request) {
-  const cf = request.cf || {};
-  let traceIp = '';
-  let traceColo = cf.colo || '未知';
-  try {
-    const tr = await fetch('https://1.1.1.1/cdn-cgi/trace', { headers: { 'User-Agent': 'CF-Worker-Trace' } });
-    const text = await tr.text();
-    const coloM = text.match(/colo=([A-Z0-9]+)/);
-    const ipM = text.match(/ip=([^\n]+)/);
-    if (coloM) traceColo = coloM[1];
-    if (ipM) traceIp = ipM[1].trim();
-  } catch (_) {}
-  return {
-    clientIp: request.headers.get('cf-connecting-ip') || '未知',
-    entryColo: cf.colo || '未知',
-    entryCountry: cf.country || '未知',
-    entryCity: cf.city || '',
-    edgeIp: traceIp || '—',
-    egressColo: traceColo,
-    cacheKey: getClientCacheKey(request),
-  };
-}
-
-async function speedtestUrl(urlStr, timeoutMs = 5000) {
-  const start = Date.now();
-  try {
-    const u = new URL(urlStr.startsWith('http') ? urlStr : 'https://' + urlStr);
-    const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), timeoutMs);
-    const res = await fetch(u.origin + '/', { method: 'HEAD', signal: ctrl.signal, redirect: 'manual' });
-    clearTimeout(tid);
-    if (res.status === 502 || res.status === 503 || res.status === 504) return -1;
-    return Date.now() - start;
-  } catch {
-    return -1;
-  }
-}
-
-async function speedtestOptimizedFromEdge() {
-  const results = [];
-  for (const item of OPTIMIZED_DOMAINS) {
-    const host = optimizedHost(item);
-    const ms = await speedtestUrl(`https://${host}/cdn-cgi/trace`, 4000);
-    results.push({
-      subdomain: item.subdomain, domain: item.domain, name: item.name, host,
-      latency: ms, status: latencyStatus(ms),
-    });
-  }
-  results.sort((a, b) => {
-    if (a.latency < 0 && b.latency < 0) return 0;
-    if (a.latency < 0) return 1;
-    if (b.latency < 0) return -1;
-    return a.latency - b.latency;
-  });
-  const best = results.find((r) => r.latency >= 0);
-  return { results, best: best ? best.host : null };
-}
-
-async function speedtestRouteTargets(env, prefix) {
-  const route = await env.DB.prepare('SELECT * FROM routes WHERE prefix = ?').bind(prefix).first();
-  if (!route) return [];
-  const targets = route.target.split(',').map(s => s.trim()).filter(Boolean);
-  const latencies = {};
-  const out = [];
-  for (const t of targets) {
-    const ms = await speedtestUrl(t);
-    latencies[t] = ms;
-    out.push({ url: t, latency: ms, status: latencyStatus(ms) });
-  }
-  await env.DB.prepare('UPDATE routes SET target_latencies = ? WHERE prefix = ?')
-    .bind(JSON.stringify(latencies), prefix).run();
-  out.sort((a, b) => {
-    if (a.latency < 0 && b.latency < 0) return 0;
-    if (a.latency < 0) return 1;
-    if (b.latency < 0) return -1;
-    return a.latency - b.latency;
-  });
-  return out;
-}
-
-async function speedtestAllRoutes(env) {
-  const { results: routes } = await env.DB.prepare('SELECT prefix, target FROM routes ORDER BY sort_order, prefix').all();
-  const allResults = {};
-  for (const route of routes || []) {
-    const targets = route.target.split(',').map(s => s.trim()).filter(Boolean);
-    const latencies = {};
-    for (const t of targets) {
-      const ms = await speedtestUrl(t);
-      latencies[t] = ms;
+function requireAdmin(request, env) {
+    if (!isAdmin(request, env)) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' }
+        });
     }
-    await env.DB.prepare('UPDATE routes SET target_latencies = ? WHERE prefix = ?')
-      .bind(JSON.stringify(latencies), route.prefix).run();
-    allResults[route.prefix] = Object.entries(latencies).map(([url, latency]) => ({
-      url, latency, status: latencyStatus(latency),
-    }));
-  }
-  return allResults;
+    return null;
 }
 
-async function saveDomainSpeedCache(env, cacheKey, rows) {
-  const now = Date.now();
-  const expires = now + CONFIG.domainCacheTtlMs;
-  const stmts = [];
-  for (const r of rows) {
-    stmts.push(env.DB.prepare(
-      `INSERT INTO domain_speed_cache (cache_key, subdomain, domain, display_name, latency_ms, status, tested_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(cache_key, subdomain, domain) DO UPDATE SET
-       latency_ms=excluded.latency_ms, status=excluded.status, tested_at=excluded.tested_at`
-    ).bind(cacheKey, r.subdomain, r.domain, r.name || r.display_name, r.latency, r.status, now));
-  }
-  const sorted = [...rows].filter((r) => r.latency >= 0).sort((a, b) => a.latency - b.latency);
-  const best = sorted[0];
-  if (best) {
-    const host = `${best.subdomain}.${best.domain}`;
-    stmts.push(env.DB.prepare(
-      `INSERT INTO domain_best_cache (cache_key, best_host, best_name, best_latency, tested_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(cache_key) DO UPDATE SET
-       best_host=excluded.best_host, best_name=excluded.best_name, best_latency=excluded.best_latency,
-       tested_at=excluded.tested_at, expires_at=excluded.expires_at`
-    ).bind(cacheKey, host, best.name || best.display_name, best.latency, now, expires));
-  }
-  await env.DB.batch(stmts);
+async function testDomainLatency(domain) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    try {
+        const start = Date.now();
+        await fetch('https://' + domain + '/', {
+            method: 'HEAD',
+            signal: controller.signal,
+            redirect: 'follow',
+            headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+        clearTimeout(timeoutId);
+        return Date.now() - start;
+    } catch (e) {
+        clearTimeout(timeoutId);
+        return -1;
+    }
 }
 
-async function loadDomainSpeedCache(env, cacheKey) {
-  const now = Date.now();
-  const best = await env.DB.prepare(
-    'SELECT * FROM domain_best_cache WHERE cache_key = ? AND expires_at > ?'
-  ).bind(cacheKey, now).first();
-  if (!best) return null;
-  const { results } = await env.DB.prepare(
-    'SELECT subdomain, domain, display_name, latency_ms, status, tested_at FROM domain_speed_cache WHERE cache_key = ? ORDER BY latency_ms ASC'
-  ).bind(cacheKey).all();
-  if (!results?.length) return null;
-  return {
-    cached: true,
-    cacheKey,
-    best: best.best_host,
-    bestName: best.best_name,
-    results: results.map((r) => ({
-      subdomain: r.subdomain, domain: r.domain, name: r.display_name, host: `${r.subdomain}.${r.domain}`,
-      latency: r.latency_ms, status: r.status,
-    })),
-    expiresAt: best.expires_at,
-  };
+function getLatencyStatus(ms) {
+    if (ms < 0) return 'timeout';
+    if (ms < 200) return 'fast';
+    if (ms < 500) return 'good';
+    return 'slow';
+}
+
+async function runOptimizedDomainTest() {
+    const promises = OPTIMIZED_DOMAINS.map(async (item) => {
+        const host = item.subdomain + '.' + item.domain;
+        const latency = await testDomainLatency(host);
+        return {
+            subdomain: item.subdomain,
+            domain: item.domain,
+            name: item.name,
+            host: host,
+            latency: latency,
+            status: getLatencyStatus(latency)
+        };
+    });
+    const allResults = await Promise.all(promises);
+    allResults.sort((a, b) => {
+        if (a.latency < 0) return 1;
+        if (b.latency < 0) return -1;
+        return a.latency - b.latency;
+    });
+    const validResults = allResults.filter(r => r.latency >= 0);
+    return {
+        results: allResults,
+        best: validResults.length > 0 ? validResults[0].host : null,
+        bestName: validResults.length > 0 ? validResults[0].name : null,
+        timestamp: new Date().toISOString()
+    };
+}
+
+async function getBestDomain(env, cacheKey) {
+    if (!env.DB) return null;
+    try {
+        const cached = await env.DB.prepare(
+            'SELECT * FROM speedtest_cache WHERE cache_key = ?'
+        ).bind(cacheKey).first();
+        if (cached) {
+            const age = (Date.now() - new Date(cached.updated_at + 'Z').getTime()) / 1000;
+            if (age < CONFIG.speedtestCacheTTL) {
+                return JSON.parse(cached.results);
+            }
+        }
+    } catch (e) {
+        console.error('Cache read error:', e.message);
+    }
+    return null;
+}
+
+async function cacheTestResult(env, cacheKey, result) {
+    if (!env.DB) return;
+    try {
+        await env.DB.prepare(
+            `INSERT INTO speedtest_cache (cache_key, best_domain, results, updated_at)
+             VALUES (?, ?, ?, datetime('now', '+8 hours'))
+             ON CONFLICT(cache_key) DO UPDATE SET best_domain = excluded.best_domain, results = excluded.results, updated_at = excluded.updated_at`
+        ).bind(cacheKey, result.best, JSON.stringify(result)).run();
+    } catch (e) {
+        console.error('Cache write error:', e.message);
+    }
+}
+
+async function testLineLatency(targetUrl) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    try {
+        const start = Date.now();
+        const response = await fetch(targetUrl, {
+            method: 'HEAD',
+            signal: controller.signal,
+            redirect: 'follow'
+        });
+        clearTimeout(timeoutId);
+        return {
+            latency: Date.now() - start,
+            status: response.status,
+            ok: response.status < 500
+        };
+    } catch (e) {
+        clearTimeout(timeoutId);
+        return { latency: -1, status: 0, ok: false };
+    }
+}
+
+function jsonResponse(data, status) {
+    return new Response(JSON.stringify(data), {
+        status: status || 200,
+        headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*'
+        }
+    });
+}
+
+async function handleAdminAliases(request, env, method) {
+    if (method === 'GET') {
+        const result = await env.DB.prepare('SELECT * FROM aliases ORDER BY sort_order, id').all();
+        return jsonResponse(result.results || []);
+    }
+
+    if (method === 'POST') {
+        const body = await request.json();
+        if (!body.alias || !body.name) {
+            return jsonResponse({ error: 'Missing required fields' }, 400);
+        }
+        const existing = await env.DB.prepare('SELECT id FROM aliases WHERE alias = ?').bind(body.alias).first();
+        if (existing) {
+            return jsonResponse({ error: '别名已存在' }, 400);
+        }
+        const result = await env.DB.prepare(
+            'INSERT INTO aliases (alias, name, icon, sort_order) VALUES (?, ?, ?, ?)'
+        ).bind(body.alias, body.name, body.icon || '\u{1F3AC}', body.sort_order || 0).run();
+        invalidateAliasCache(body.alias);
+        return jsonResponse({ success: true, id: result.meta.last_row_id });
+    }
+
+    if (method === 'PUT') {
+        const body = await request.json();
+        if (!body.id) return jsonResponse({ error: 'Missing id' }, 400);
+        const existing = await env.DB.prepare('SELECT id FROM aliases WHERE alias = ? AND id != ?').bind(body.alias, body.id).first();
+        if (existing) {
+            return jsonResponse({ error: '别名已被其他条目使用' }, 400);
+        }
+        await env.DB.prepare(
+            'UPDATE aliases SET alias = ?, name = ?, icon = ?, sort_order = ? WHERE id = ?'
+        ).bind(body.alias, body.name, body.icon || '\u{1F3AC}', body.sort_order || 0, body.id).run();
+        invalidateAliasCache();
+        return jsonResponse({ success: true });
+    }
+
+    if (method === 'DELETE') {
+        const deleteUrl = new URL(request.url);
+        const id = deleteUrl.searchParams.get('id');
+        if (!id) return jsonResponse({ error: 'Missing id' }, 400);
+        await env.DB.prepare('DELETE FROM alias_lines WHERE alias_id = ?').bind(id).run();
+        await env.DB.prepare('DELETE FROM aliases WHERE id = ?').bind(id).run();
+        invalidateAliasCache();
+        return jsonResponse({ success: true });
+    }
+
+    return jsonResponse({ error: 'Method not allowed' }, 405);
+}
+
+async function handleAdminLines(request, env, method, url) {
+    if (method === 'GET') {
+        const aliasId = url.searchParams.get('alias_id');
+        if (!aliasId) return jsonResponse({ error: 'Missing alias_id' }, 400);
+        const result = await env.DB.prepare(
+            'SELECT * FROM alias_lines WHERE alias_id = ? ORDER BY sort_order, id'
+        ).bind(aliasId).all();
+        return jsonResponse(result.results || []);
+    }
+
+    if (method === 'POST') {
+        const body = await request.json();
+        if (!body.alias_id || !body.target_url || !body.line_name) {
+            return jsonResponse({ error: 'Missing required fields' }, 400);
+        }
+        const result = await env.DB.prepare(
+            'INSERT INTO alias_lines (alias_id, target_url, line_name, mode, cache_img, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
+        ).bind(body.alias_id, body.target_url, body.line_name, body.mode || 'off', body.cache_img ? 1 : 0, body.sort_order || 0).run();
+        invalidateAliasCache();
+        return jsonResponse({ success: true, id: result.meta.last_row_id });
+    }
+
+    if (method === 'PUT') {
+        const body = await request.json();
+        if (!body.id) return jsonResponse({ error: 'Missing id' }, 400);
+        await env.DB.prepare(
+            'UPDATE alias_lines SET target_url = ?, line_name = ?, mode = ?, cache_img = ?, sort_order = ? WHERE id = ?'
+        ).bind(body.target_url, body.line_name, body.mode || 'off', body.cache_img ? 1 : 0, body.sort_order || 0, body.id).run();
+        invalidateAliasCache();
+        return jsonResponse({ success: true });
+    }
+
+    if (method === 'DELETE') {
+        const id = url.searchParams.get('id');
+        if (!id) return jsonResponse({ error: 'Missing id' }, 400);
+        await env.DB.prepare('DELETE FROM alias_lines WHERE id = ?').bind(id).run();
+        invalidateAliasCache();
+        return jsonResponse({ success: true });
+    }
+
+    return jsonResponse({ error: 'Method not allowed' }, 405);
+}
+
+var _iconsCache = null;
+var _iconsCacheTime = 0;
+
+async function handleAdminIcons(request, env, url) {
+    const now = Date.now();
+    if (_iconsCache && (now - _iconsCacheTime) < 3600000) {
+        return jsonResponse(_iconsCache);
+    }
+    try {
+        const resp = await fetch('https://raw.githubusercontent.com/lige47/QuanX-icon-rule/refs/heads/main/lige-emby-icon.json');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        _iconsCache = { icons: data.icons || [], name: data.name || '', description: data.description || '' };
+        _iconsCacheTime = now;
+        return jsonResponse(_iconsCache);
+    } catch(e) {
+        if (_iconsCache) return jsonResponse(_iconsCache);
+        return jsonResponse({ icons: [], error: e.message }, 500);
+    }
+}
+
+async function handleLineSpeedTest(request, env, url) {
+    const aliasId = url.searchParams.get('alias_id');
+    if (!aliasId) return jsonResponse({ error: 'Missing alias_id' }, 400);
+
+    const lines = await env.DB.prepare(
+        'SELECT * FROM alias_lines WHERE alias_id = ? ORDER BY sort_order, id'
+    ).bind(aliasId).all();
+
+    if (!lines.results || lines.results.length === 0) {
+        return jsonResponse({ error: 'No lines found' }, 404);
+    }
+
+    const results = [];
+    for (const line of lines.results) {
+        const testResult = await testLineLatency(line.target_url);
+        results.push({
+            id: line.id,
+            line_name: line.line_name,
+            target_url: line.target_url,
+            latency: testResult.latency,
+            status: testResult.status,
+            ok: testResult.ok
+        });
+    }
+
+    results.sort((a, b) => {
+        if (a.latency < 0) return 1;
+        if (b.latency < 0) return -1;
+        return a.latency - b.latency;
+    });
+
+    return jsonResponse({ results: results, best: results.length > 0 && results[0].latency >= 0 ? results[0].id : null });
+}
+
+async function handleDomainSpeedTest(request, env) {
+    const result = await runOptimizedDomainTest();
+    const cf = request.cf || {};
+    const cacheKey = getCacheKey(cf);
+    if (cacheKey && env.DB) {
+        await cacheTestResult(env, cacheKey, result);
+    }
+    result.cacheKey = cacheKey;
+    result.region = cf.region || '';
+    result.isp = getISPName(cf);
+    return jsonResponse(result);
+}
+
+async function handleAdminRequest(request, env, url) {
+    const path = url.pathname;
+    const method = request.method;
+
+    const authErr = requireAdmin(request, env);
+    if (authErr) return authErr;
+
+    if (!env.DB) {
+        return jsonResponse({ error: 'D1 数据库未绑定，请在 Worker 设置中绑定 DB' }, 500);
+    }
+
+    if (path === '/admin/api/aliases') {
+        return handleAdminAliases(request, env, method);
+    }
+    if (path === '/admin/api/lines') {
+        return handleAdminLines(request, env, method, url);
+    }
+    if (path === '/admin/api/speedtest/lines') {
+        return handleLineSpeedTest(request, env, url);
+    }
+    if (path === '/admin/api/speedtest/domains') {
+        return handleDomainSpeedTest(request, env);
+    }
+    if (path === '/admin/api/icons') {
+        return handleAdminIcons(request, env, url);
+    }
+
+    return new Response(JSON.stringify({ error: 'Not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' }
+    });
+}
+
+async function handleConnectionInfo(request) {
+    const cf = request.cf || {};
+    return new Response(JSON.stringify({
+        colo: cf.colo || 'Unknown',
+        country: cf.country || 'Unknown',
+        region: cf.region || '',
+        city: cf.city || '',
+        isp: cf.asOrganization || '',
+        asn: cf.asn || '',
+        timezone: cf.timezone || '',
+        host: request.headers.get('host') || ''
+    }), {
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+    });
+}
+
+function getCacheKey(cf) {
+    if (!cf || cf.country !== 'CN') return null;
+    const region = cf.region || 'Unknown';
+    const asn = cf.asn || '0';
+    return 'CN-' + region + '-' + asn;
+}
+
+function getISPName(cf) {
+    return cf.asOrganization || 'Unknown';
+}
+
+async function handleBestDomain(request, env) {
+    const cf = request.cf || {};
+    const cacheKey = getCacheKey(cf);
+    if (!cacheKey) {
+        return new Response(JSON.stringify({
+            cached: false,
+            best: null,
+            bestName: null,
+            cacheKey: null,
+            message: '非中国用户不适用智能选线'
+        }), {
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        });
+    }
+    let cached = await getBestDomain(env, cacheKey);
+    if (cached) {
+        return new Response(JSON.stringify({
+            cached: true,
+            best: cached.best,
+            bestName: cached.bestName,
+            cacheKey: cacheKey,
+            region: cf.region || '',
+            isp: getISPName(cf),
+            timestamp: cached.timestamp
+        }), {
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        });
+    }
+    const result = await runOptimizedDomainTest();
+    await cacheTestResult(env, cacheKey, result);
+    return new Response(JSON.stringify({
+        cached: false,
+        best: result.best,
+        bestName: result.bestName,
+        cacheKey: cacheKey,
+        region: cf.region || '',
+        isp: getISPName(cf),
+        timestamp: result.timestamp
+    }), {
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+    });
 }
 
 async function recordStats(env, type) {
-  if (!env.DB || !CONFIG.enableStats) return;
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
-  const q = type === 'playing'
-    ? `INSERT INTO auto_emby_daily_stats (date, playing_count, playback_info_count) VALUES (?, 1, 0)
-       ON CONFLICT(date) DO UPDATE SET playing_count = playing_count + 1`
-    : `INSERT INTO auto_emby_daily_stats (date, playing_count, playback_info_count) VALUES (?, 0, 1)
-       ON CONFLICT(date) DO UPDATE SET playback_info_count = playback_info_count + 1`;
-  await env.DB.prepare(q).bind(today).run();
+    try {
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+        if (!env.DB) return;
+        let query = '';
+        let params = [];
+        if (type === 'playing') {
+            query = `INSERT INTO auto_emby_daily_stats (date, playing_count, playback_info_count) VALUES (?, 1, 0) ON CONFLICT(date) DO UPDATE SET playing_count = playing_count + 1`;
+            params = [today];
+        } else if (type === 'playback_info') {
+            query = `INSERT INTO auto_emby_daily_stats (date, playing_count, playback_info_count) VALUES (?, 0, 1) ON CONFLICT(date) DO UPDATE SET playback_info_count = playback_info_count + 1`;
+            params = [today];
+        }
+        if (query) await env.DB.prepare(query).bind(...params).run();
+    } catch (e) {
+        console.error('Stats record error:', e);
+    }
 }
 
 async function handleStatsRequest(env) {
-  if (!env.DB) return json({ error: "D1 数据库未绑定", data: null });
-  const statsResult = await env.DB.prepare(
-    `SELECT date, playing_count, playback_info_count FROM auto_emby_daily_stats
-     WHERE date >= date('now', '-30 days') ORDER BY date DESC`
-  ).all();
-  const totalResult = await env.DB.prepare(
-    `SELECT SUM(playing_count) as total_playing, SUM(playback_info_count) as total_playback_info
-     FROM auto_emby_daily_stats WHERE date >= date('now', '-30 days')`
-  ).first();
-  return json({
-    error: null,
-    data: {
-      total: { playing: totalResult?.total_playing || 0, playbackInfo: totalResult?.total_playback_info || 0 },
-      dailyStats: statsResult?.results || [],
-      lastUpdated: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
-    },
-  });
-}
-
-function normalizePrefix(p) {
-  return String(p || '').trim().toLowerCase().replace(/^\/+|\/+$/g, '');
-}
-
-function validatePrefix(prefix) {
-  const a = normalizePrefix(prefix);
-  if (!a || !/^[a-z0-9][a-z0-9_-]{0,62}$/i.test(a)) return '路径仅允许字母数字、下划线和连字符';
-  if (RESERVED_ALIASES.has(a.toLowerCase())) return '该路径为系统保留，不可使用';
-  return null;
-}
-
-async function handleAdminApi(request, env, url) {
-  if (!isAdmin(request, env)) return new Response('Unauthorized', { status: 401 });
-
-  if (url.pathname === '/admin/api/routes') {
-    if (request.method === 'GET') {
-      const { results } = await env.DB.prepare('SELECT * FROM routes ORDER BY sort_order, prefix').all();
-      return json(results || []);
-    }
-    if (request.method === 'POST') {
-      const data = await request.json();
-      const err = validatePrefix(data.prefix);
-      if (err) return json({ error: err }, 400);
-      const prefix = normalizePrefix(data.prefix);
-      let currentSortOrder = 0;
-      if (data.oldPrefix && data.oldPrefix !== data.prefix) {
-        const oldRow = await env.DB.prepare('SELECT sort_order FROM routes WHERE prefix = ?').bind(normalizePrefix(data.oldPrefix)).first();
-        if (oldRow) currentSortOrder = oldRow.sort_order;
-        await env.DB.prepare('DELETE FROM routes WHERE prefix = ?').bind(normalizePrefix(data.oldPrefix)).run();
-      } else {
-        const oldRow = await env.DB.prepare('SELECT sort_order FROM routes WHERE prefix = ?').bind(prefix).first();
-        if (oldRow) currentSortOrder = oldRow.sort_order;
-      }
-      await env.DB.prepare(
-        'INSERT OR REPLACE INTO routes (prefix, target, remark, cache_img, compat_mode, sort_order, target_latencies) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).bind(
-        prefix, data.target, data.remark || '', data.cache_img || 'on', data.compat_mode || 'off', currentSortOrder, ''
-      ).run();
-      return json({ success: true });
-    }
-    if (request.method === 'DELETE') {
-      const prefix = url.searchParams.get('prefix');
-      if (!prefix) return json({ error: '缺少 prefix 参数' }, 400);
-      await env.DB.prepare('DELETE FROM routes WHERE prefix = ?').bind(normalizePrefix(prefix)).run();
-      return json({ success: true });
-    }
-  }
-
-  if (url.pathname === '/admin/api/speedtest/routes' && request.method === 'POST') {
-    const prefix = url.searchParams.get('prefix');
-    if (prefix) {
-      const results = await speedtestRouteTargets(env, normalizePrefix(prefix));
-      return json({ results });
-    }
-    const allResults = await speedtestAllRoutes(env);
-    return json({ results: allResults });
-  }
-
-  if (url.pathname === '/admin/api/speedtest/domains' && request.method === 'POST') {
-    const data = await speedtestOptimizedFromEdge();
-    return json(data);
-  }
-
-  return json({ error: 'Not found' }, 404);
-}
-
-async function resolveProxyTarget(request, env, url) {
-  const decodedPath = decodeURIComponent(url.pathname);
-  let upstreamUrls = [];
-  let enableCache = true;
-  let compatMode = false;
-  let matchedPrefix = null;
-  let needsSpeedTest = false;
-
-  const pathParts = decodedPath.split('/').filter(Boolean);
-  const prefix = normalizeAlias(pathParts[0]);
-  if (!prefix) return { error: new Response('Not Found', { status: 404 }) };
-
-  const route = await env.DB.prepare('SELECT * FROM routes WHERE prefix = ?').bind(prefix).first();
-  if (!route) return { error: new Response('404: 节点不存在', { status: 404 }) };
-
-  matchedPrefix = route.prefix;
-  enableCache = route.cache_img !== 'off';
-  compatMode = route.compat_mode === 'on';
-  const remainingPath = '/' + pathParts.slice(1).join('/');
-  let targetUrls = route.target.split(',').map(s => s.trim()).filter(Boolean);
-
-  if (remainingPath.startsWith('/http://') || remainingPath.startsWith('/https://')) {
-    upstreamUrls = [remainingPath.substring(1) + url.search];
-    enableCache = true;
-  } else {
-    if (targetUrls.length > 1 && route.target_latencies) {
-      try {
-        const latencies = JSON.parse(route.target_latencies);
-        const hasAnyLatency = Object.values(latencies).some(v => typeof v === 'number' && v >= 0);
-        if (hasAnyLatency) {
-          targetUrls.sort((a, b) => {
-            const la = latencies[a];
-            const lb = latencies[b];
-            if (typeof la !== 'number' || la < 0) return 1;
-            if (typeof lb !== 'number' || lb < 0) return -1;
-            return la - lb;
-          });
+    try {
+        if (!env.DB) {
+            return new Response(JSON.stringify({ error: 'D1 database not bound', data: null }), {
+                headers: { 'Content-Type': 'application/json; charset=utf-8' }
+            });
         }
-      } catch (_) {}
+        const statsResult = await env.DB.prepare(
+            `SELECT date, playing_count, playback_info_count FROM auto_emby_daily_stats WHERE date >= date('now', '-30 days') ORDER BY date DESC`
+        ).all();
+        const totalResult = await env.DB.prepare(
+            `SELECT SUM(playing_count) as total_playing, SUM(playback_info_count) as total_playback_info FROM auto_emby_daily_stats WHERE date >= date('now', '-30 days')`
+        ).first();
+        return new Response(JSON.stringify({
+            error: null,
+            data: {
+                total: {
+                    playing: totalResult?.total_playing || 0,
+                    playbackInfo: totalResult?.total_playback_info || 0
+                },
+                dailyStats: statsResult?.results || [],
+                lastUpdated: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+            }
+        }), {
+            headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
+        });
+    } catch (e) {
+        return new Response(JSON.stringify({ error: 'Stats error: ' + e.message, data: null }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json; charset=utf-8' }
+        });
     }
-    if (targetUrls.length > 1 && !route.target_latencies) {
-      needsSpeedTest = true;
-    }
-    upstreamUrls = targetUrls.map(t => t.replace(/\/+$/, '') + remainingPath + url.search);
-  }
-
-  return { upstreamUrls, enableCache, compatMode, matchedPrefix, needsSpeedTest };
 }
 
-function normalizeAlias(a) {
-  return String(a || '').trim().toLowerCase().replace(/^\/+|\/+$/g, '');
+function isIPAllowed(ip, env) {
+    if (!ip) return false;
+    if (!env.ALLOWED_IPS) return true;
+    const allowedIPs = env.ALLOWED_IPS.split(',').map(ip => ip.trim()).filter(ip => ip);
+    if (allowedIPs.length === 0) return true;
+    return allowedIPs.some(allowed => {
+        if (allowed.includes('/')) {
+            return isIPInCIDR(ip, allowed);
+        }
+        return ip === allowed;
+    });
 }
 
-async function proxyDirectUrl(request, env, ctx, upstreamUrls, opts = {}) {
-  const { enableCache = true, compatMode = false, matchedPrefix = null, needsSpeedTest = false } = opts;
-  const proxyOrigin = new URL(request.url).origin;
-
-  if (!upstreamUrls.length) return new Response('404: Target empty', { status: 404 });
-
-  if (needsSpeedTest && matchedPrefix && env.DB && ctx?.waitUntil) {
-    ctx.waitUntil(speedtestRouteTargets(env, matchedPrefix));
-  }
-
-  let firstUpstreamUrl;
-  try {
-    firstUpstreamUrl = new URL(upstreamUrls[0]);
-  } catch {
-    return new Response('Invalid upstream URL', { status: 500 });
-  }
-
-  const isPlaybackInfo = /\/PlaybackInfo/i.test(firstUpstreamUrl.pathname);
-  const isPlaying = firstUpstreamUrl.pathname.endsWith('/Sessions/Playing');
-
-  if (isPlaying && CONFIG.enableStats) {
-    ctx.waitUntil(recordStats(env, 'playing'));
-  }
-  if (isPlaybackInfo) {
-    ctx.waitUntil(recordStats(env, 'playback_info'));
-  }
-
-  if (matchedPrefix && env.DB && ctx?.waitUntil && isPlaybackInfo) {
-    const todayStr = new Date(Date.now() + 8 * 3600000).toISOString().split('T')[0];
-    const nowTime = new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').split('.')[0];
-    const clientIp = request.headers.get('cf-connecting-ip') || 'Unknown';
-    const clientCountry = request.headers.get('cf-ipcountry') || 'Unknown';
-    const clientUa = request.headers.get('User-Agent') || 'Unknown';
+function isIPInCIDR(ip, cidr) {
     try {
-      ctx.waitUntil(env.DB.batch([
-        env.DB.prepare(`INSERT INTO request_stats (prefix, date, count) VALUES (?, ?, 1) ON CONFLICT(prefix, date) DO UPDATE SET count = count + 1`).bind(matchedPrefix, todayStr),
-        env.DB.prepare(`UPDATE routes SET last_play = ? WHERE prefix = ?`).bind(nowTime, matchedPrefix),
-        env.DB.prepare(`INSERT INTO visitor_logs (prefix, ip, country, ua) VALUES (?, ?, ?, ?)`).bind(matchedPrefix, clientIp, clientCountry, clientUa),
-      ]));
-    } catch(_) {}
-  }
-
-  const upgradeHeader = request.headers.get('Upgrade');
-  if (upgradeHeader?.toLowerCase() === 'websocket') {
-    return fetch(upstreamUrls[0], request);
-  }
-
-  let requestBody = null;
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    requestBody = await request.arrayBuffer();
-  }
-
-  let finalResponse = null;
-  let lastError = null;
-  let lastUpstreamUrl = null;
-
-  for (let i = 0; i < upstreamUrls.length; i++) {
-    let upstreamUrl;
-    try {
-      upstreamUrl = new URL(upstreamUrls[i]);
+        const [range, bits] = cidr.split('/');
+        const mask = ~(2 ** (32 - parseInt(bits)) - 1);
+        const ipNum = ipToNum(ip);
+        const rangeNum = ipToNum(range);
+        return (ipNum & mask) === (rangeNum & mask);
     } catch {
-      lastError = new Error('Invalid target URL');
-      continue;
+        return false;
+    }
+}
+
+function ipToNum(ip) {
+    return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
+}
+
+async function proxyToTarget(request, upstreamUrl, mode, env, preReadBody) {
+    const upgradeHeader = request.headers.get('Upgrade');
+    if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
+        return fetch(upstreamUrl.toString(), request);
     }
 
-    if (PIKPAK_DOMAINS.some((d) => upstreamUrl.hostname.endsWith(d))) {
-      return Response.redirect(new URL(upstreamUrl.pathname + upstreamUrl.search, CONFIG.pikpakProxyUrl).toString(), 301);
-    }
-    if (blocker.check(upstreamUrl.toString())) return Response.redirect('https://baidu.com', 301);
+    const upstreamRequestHeaders = new Headers(request.headers);
+    upstreamRequestHeaders.set('Host', upstreamUrl.host);
+    upstreamRequestHeaders.delete('Referer');
 
-    const colo = request.cf?.colo;
-    if (colo && JP_COLOS.includes(colo)) {
-      for (const suffix in DOMAIN_PROXY_RULES) {
-        if (upstreamUrl.host.endsWith(suffix)) {
-          upstreamUrl.hostname = DOMAIN_PROXY_RULES[suffix];
-          break;
-        }
-      }
-    }
-
-    const headers = new Headers(request.headers);
-    headers.set('Host', upstreamUrl.host);
-    headers.delete('Referer');
     const clientIp = request.headers.get('cf-connecting-ip');
     if (clientIp) {
-      headers.set('x-forwarded-for', clientIp);
-      headers.set('x-real-ip', clientIp);
-    }
-    if (compatMode) {
-      headers.set('Origin', upstreamUrl.origin);
-      headers.set('X-Forwarded-Proto', upstreamUrl.protocol.replace(':', ''));
-      headers.set('X-Forwarded-Host', upstreamUrl.host);
+        upstreamRequestHeaders.set('x-forwarded-for', clientIp);
+        upstreamRequestHeaders.set('x-real-ip', clientIp);
     }
 
-    const isStaticOrImage = /\.(jpg|jpeg|gif|png|svg|ico|webp|js|css|woff2?|ttf|otf|map|webmanifest|srt|ass|vtt|sub)$/i.test(upstreamUrl.pathname) ||
-      /(\/Images\/|\/Icons\/|\/Branding\/|\/emby\/covers\/)/i.test(upstreamUrl.pathname);
-
-    const fetchInit = { method: request.method, headers, redirect: compatMode ? 'follow' : 'manual' };
-    if (isStaticOrImage && enableCache) fetchInit.cf = { cacheEverything: true, cacheTtl: 86400 };
-    if (requestBody) fetchInit.body = requestBody;
-
-    try {
-      const response = await fetch(new Request(upstreamUrl.toString(), fetchInit));
-      if (!compatMode && [502, 503, 504].includes(response.status)) {
-        lastError = new Error(`HTTP ${response.status}`);
-        continue;
-      }
-      finalResponse = response;
-      lastUpstreamUrl = upstreamUrl;
-      break;
-    } catch (err) {
-      lastError = err;
-      continue;
-    }
-  }
-
-  if (!finalResponse) {
-    return new Response('所有线路不可用: ' + (lastError?.message || 'Unknown'), { status: 502 });
-  }
-
-  const safePrefix = matchedPrefix ? `/${matchedPrefix}` : '';
-
-  if (!compatMode) {
-    const location = finalResponse.headers.get('Location');
-    if (location && finalResponse.status >= 300 && finalResponse.status < 400) {
-      try {
-        const redirectUrl = new URL(location, lastUpstreamUrl);
-        if (redirectUrl.hostname === lastUpstreamUrl.hostname) {
-          return fetch(redirectUrl.toString(), new Request(redirectUrl, { method: request.method, headers: finalResponse.headers, redirect: 'follow' }));
+    if (mode === 'dual') {
+        const realIP = request.headers.get('x-real-ip') || request.headers.get('x-forwarded-for') || request.headers.get('cf-connecting-ip');
+        if (!isIPAllowed(realIP, env)) {
+            upstreamRequestHeaders.delete('x-real-ip');
+            upstreamRequestHeaders.delete('x-forwarded-for');
         }
-        if (MANUAL_REDIRECT_DOMAINS.some((d) => redirectUrl.hostname.endsWith(d))) {
-          const rh = new Headers(finalResponse.headers);
-          rh.set('Location', redirectUrl.toString());
-          return new Response(finalResponse.body, { status: finalResponse.status, headers: rh });
+    }
+
+    let requestBody = request.body;
+    if (preReadBody !== undefined && preReadBody !== null) {
+        requestBody = preReadBody;
+    } else if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) {
+        const ct = (request.headers.get('content-type') || '').toLowerCase();
+        if (ct.includes('application/json')) {
+            requestBody = JSON.stringify(await request.json());
+        } else if (ct.includes('application/text') || ct.includes('text/html')) {
+            requestBody = await request.text();
+        } else if (ct.includes('form')) {
+            requestBody = await request.formData();
+        } else {
+            requestBody = await request.blob();
         }
-        if (matchedPrefix) {
-          const rh = new Headers(finalResponse.headers);
-          rh.set('Location', `${safePrefix}/${encodeURIComponent(redirectUrl.toString())}`);
-          return new Response(finalResponse.body, { status: finalResponse.status, headers: rh });
-        }
-        const fh = new Headers(request.headers);
-        fh.set('Host', redirectUrl.host);
-        fh.delete('Referer');
-        const cIp = request.headers.get('cf-connecting-ip');
-        if (cIp) {
-          fh.set('x-forwarded-for', cIp);
-          fh.set('x-real-ip', cIp);
-        }
-        return fetch(redirectUrl.toString(), { method: request.method, headers: fh, body: requestBody || undefined, redirect: 'follow' });
-      } catch (_) {}
     }
-  }
 
-  const responseHeaders = new Headers(finalResponse.headers);
-  const contentType = finalResponse.headers.get('content-type') || '';
-
-  if (!compatMode && finalResponse.status === 200 && contentType.includes('json') && matchedPrefix) {
-    const urlPath = lastUpstreamUrl.pathname.toLowerCase();
-    if (urlPath.includes('playbackinfo')) {
-      try {
-        const data = await finalResponse.clone().json();
-        let modified = false;
-        if (data?.MediaSources) {
-          data.MediaSources.forEach((source) => {
-            ['DirectStreamUrl', 'TranscodingUrl'].forEach((key) => {
-              if (source[key]?.startsWith('http')) {
-                try {
-                  const mediaUrl = new URL(source[key]);
-                  const isDirectDomain = MANUAL_REDIRECT_DOMAINS.some(d => mediaUrl.hostname.endsWith(d));
-                  if (!isDirectDomain) {
-                    source[key] = proxyOrigin + safePrefix + '/' + source[key];
-                    modified = true;
-                  }
-                } catch (_) {
-                  source[key] = proxyOrigin + safePrefix + '/' + source[key];
-                  modified = true;
-                }
-              }
-            });
-          });
-        }
-        if (modified) {
-          responseHeaders.delete('Content-Length');
-          return new Response(JSON.stringify(data), { status: finalResponse.status, headers: responseHeaders });
-        }
-      } catch (_) {}
-    }
-  }
-
-  if (!compatMode && finalResponse.status === 200 && matchedPrefix) {
-    const urlPath = lastUpstreamUrl.pathname.toLowerCase();
-    if (urlPath.endsWith('.m3u8')) {
-      try {
-        const text = await finalResponse.clone().text();
-        if (text.includes('http://') || text.includes('https://')) {
-          const modifiedText = text.replace(/(https?:\/\/[^\s]+)/g, (match) => {
-            try {
-              const mUrl = new URL(match);
-              const isDirectDomain = MANUAL_REDIRECT_DOMAINS.some(d => mUrl.hostname.endsWith(d));
-              return isDirectDomain ? match : proxyOrigin + safePrefix + '/' + match;
-            } catch (_) {
-              return proxyOrigin + safePrefix + '/' + match;
-            }
-          });
-          responseHeaders.delete('Content-Length');
-          return new Response(modifiedText, { status: finalResponse.status, headers: responseHeaders });
-        }
-      } catch (_) {}
-    }
-  }
-
-  if (CONFIG.cacheEnabled) {
-    if (contentType.includes('image/') || contentType.includes('text/css') || contentType.includes('application/javascript')) {
-      responseHeaders.set('Cache-Control', 'public, max-age=86400');
-    } else if (contentType.includes('video/') || contentType.includes('audio/')) {
-      responseHeaders.set('Cache-Control', 'public, max-age=3600');
-    } else {
-      responseHeaders.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    }
-  }
-
-  responseHeaders.set('Access-Control-Allow-Origin', '*');
-  responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  responseHeaders.set('Access-Control-Allow-Headers', '*');
-  responseHeaders.set('X-Content-Type-Options', 'nosniff');
-
-  return new Response(finalResponse.body, {
-    status: finalResponse.status,
-    statusText: finalResponse.statusText,
-    headers: responseHeaders,
-  });
-}
-
-const PAGE_STYLE = `
-  * { box-sizing: border-box; }
-  body { font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; color: #e5e7eb; margin: 0; padding: 0; background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); min-height: 100vh; }
-  .container { max-width: 1200px; margin: auto; padding: 24px; display: flex; flex-direction: column; gap: 24px; }
-  .card { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); padding: 28px; border-radius: 20px; border: 1px solid rgba(148, 163, 184, 0.15); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3); }
-  h1 { margin-top: 0; color: #60a5fa; font-size: 2em; font-weight: 700; letter-spacing: -0.02em; }
-  h2 { color: #94a3b8; border-bottom: 2px solid rgba(148, 163, 184, 0.15); padding-bottom: 12px; font-size: 1.2em; font-weight: 600; letter-spacing: -0.01em; }
-  code { background: rgba(96, 165, 250, 0.15); padding: 4px 10px; border-radius: 8px; color: #93c5fd; word-break: break-all; font-size: 0.9em; border: 1px solid rgba(96, 165, 250, 0.2); }
-  .muted { color: #94a3b8; font-size: 14px; }
-  .stat-row { display: flex; gap: 16px; flex-wrap: wrap; margin: 20px 0; }
-  .stat-card { flex: 1; min-width: 160px; background: linear-gradient(135deg, rgba(96, 165, 250, 0.1) 0%, rgba(59, 130, 246, 0.05) 100%); border: 1px solid rgba(96, 165, 250, 0.2); border-radius: 16px; padding: 20px; text-align: center; transition: transform 0.2s ease, box-shadow 0.2s ease; }
-  .stat-card:hover { transform: translateY(-2px); box-shadow: 0 10px 30px rgba(96, 165, 250, 0.2); }
-  .stat-val { font-size: 2em; font-weight: 700; color: #60a5fa; }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid rgba(148, 163, 184, 0.15); }
-  th { color: #60a5fa; background: rgba(96, 165, 250, 0.08); font-weight: 600; }
-  tr.best td { background: rgba(34, 197, 94, 0.08); }
-  .tag { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-  .tag-fast { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
-  .tag-good { background: rgba(96, 165, 250, 0.2); color: #93c5fd; border: 1px solid rgba(96, 165, 250, 0.3); }
-  .tag-slow { background: rgba(251, 191, 36, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.3); }
-  .tag-timeout { background: rgba(248, 113, 113, 0.2); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.3); }
-  .edge-box { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
-  .edge-item { background: rgba(15, 23, 42, 0.5); padding: 16px; border-radius: 12px; font-size: 13px; border: 1px solid rgba(148, 163, 184, 0.1); }
-  .edge-item strong { color: #60a5fa; display: block; margin-bottom: 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
-  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%); color: #fff; border-radius: 12px; text-decoration: none; font-weight: 600; border: none; cursor: pointer; font-size: 14px; transition: all 0.2s ease; box-shadow: 0 4px 15px rgba(96, 165, 250, 0.3); }
-  .btn:hover { background: linear-gradient(135deg, #93c5fd 0%, #60a5fa 100%); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(96, 165, 250, 0.4); }
-  .btn:active { transform: translateY(0); }
-  .btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
-  .warn { border: 2px solid rgba(248, 113, 113, 0.3); padding: 20px; border-radius: 16px; color: #fca5a5; background: rgba(248, 113, 113, 0.08); }
-  input[type=password], input[type=text], input[type=url], select { width: 100%; padding: 14px 16px; border: 2px solid rgba(148, 163, 184, 0.2); border-radius: 12px; background: rgba(15, 23, 42, 0.6); color: #e5e7eb; margin-bottom: 16px; font-size: 14px; transition: all 0.2s ease; }
-  input[type=password]:focus, input[type=text]:focus, input[type=url]:focus, select:focus { outline: none; border-color: #60a5fa; box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.1); }
-  label { display: block; font-weight: 600; margin-bottom: 8px; font-size: 13px; color: #cbd5e1; text-transform: uppercase; letter-spacing: 0.05em; }
-  .form-row { margin-bottom: 20px; }
-  .toolbar { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; align-items: center; }
-  .route-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 20px; }
-  .route-item { background: linear-gradient(135deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.9) 100%); border: 1px solid rgba(148, 163, 184, 0.15); border-radius: 20px; padding: 24px; transition: all 0.3s ease; position: relative; overflow: hidden; }
-  .route-item::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px; background: linear-gradient(90deg, #60a5fa 0%, #a78bfa 50%, #60a5fa 100%); opacity: 0; transition: opacity 0.3s ease; }
-  .route-item:hover { transform: translateY(-4px); box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4); border-color: rgba(96, 165, 250, 0.3); }
-  .route-item:hover::before { opacity: 1; }
-  .route-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-  .route-title { flex: 1; }
-  .route-name { font-size: 1.3em; font-weight: 700; color: #f1f5f9; margin: 0 0 4px; letter-spacing: -0.01em; }
-  .route-path { color: #60a5fa; font-weight: 600; font-size: 0.95em; }
-  .route-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; padding-top: 16px; border-top: 1px solid rgba(148, 163, 184, 0.1); }
-  .btn-sm { padding: 8px 14px; font-size: 13px; border-radius: 10px; font-weight: 500; }
-  .btn-del { background: rgba(248, 113, 113, 0.15); border: 1px solid rgba(248, 113, 113, 0.3); color: #fca5a5; box-shadow: none; }
-  .btn-del:hover { background: rgba(248, 113, 113, 0.25); }
-  .btn-outline { background: rgba(148, 163, 184, 0.15); border: 1px solid rgba(148, 163, 184, 0.3); color: #cbd5e1; box-shadow: none; }
-  .btn-outline:hover { background: rgba(148, 163, 184, 0.25); }
-  .target-list { margin-top: 12px; }
-  .target-row { background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(148, 163, 184, 0.1); border-radius: 12px; padding: 12px 16px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 12px; transition: all 0.2s ease; }
-  .target-row:hover { background: rgba(15, 23, 42, 0.8); border-color: rgba(148, 163, 184, 0.2); }
-  .target-url { color: #94a3b8; font-size: 13px; word-break: break-all; flex: 1; }
-  .target-latency { font-size: 13px; font-weight: 600; white-space: nowrap; }
-  .route-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-  .meta-tag { font-size: 11px; padding: 3px 8px; background: rgba(148, 163, 184, 0.15); border-radius: 20px; color: #cbd5e1; }
-  .modal { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(8px); z-index: 1000; padding: 20px; overflow: auto; animation: fadeIn 0.2s ease; }
-  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-  .modal.show { display: flex; align-items: center; justify-content: center; }
-  .modal-inner { background: linear-gradient(135deg, rgba(30, 41, 59, 0.95) 0%, rgba(15, 23, 42, 0.95) 100%); padding: 32px; border-radius: 24px; max-width: 560px; width: 100%; border: 1px solid rgba(148, 163, 184, 0.2); box-shadow: 0 25px 60px rgba(0, 0, 0, 0.5); animation: slideUp 0.3s ease; }
-  @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-  .modal-header { margin-bottom: 24px; }
-  .modal-title { font-size: 1.5em; font-weight: 700; color: #f1f5f9; margin: 0; }
-  .search-box { position: relative; flex: 1; min-width: 240px; }
-  .search-box input { margin-bottom: 0; padding-left: 44px; }
-  .search-icon { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); color: #64748b; pointer-events: none; }
-  .empty-state { text-align: center; padding: 48px 24px; color: #64748b; }
-  .empty-state-icon { font-size: 4em; margin-bottom: 16px; display: block; }
-  .empty-state-text { font-size: 1.1em; margin: 0; }
-  .form-group { margin-bottom: 20px; }
-  .form-group label { display: block; color: #cbd5e1; margin-bottom: 8px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
-  .form-group input, .form-group select { width: 100%; padding: 14px 16px; border: 2px solid rgba(148, 163, 184, 0.2); border-radius: 12px; background: rgba(15, 23, 42, 0.6); color: #e5e7eb; font-size: 14px; transition: all 0.2s ease; margin-bottom: 0; }
-  .form-group input:focus, .form-group select:focus { outline: none; border-color: #60a5fa; box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.1); }
-  .form-hint { color: #64748b; font-size: 12px; margin: 8px 0 0; }
-  .form-hint span { color: #60a5fa; font-weight: 600; }
-  .modal-desc { color: #94a3b8; font-size: 14px; margin: 8px 0 0; }
-  .modal-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 28px; padding-top: 20px; border-top: 1px solid rgba(148, 163, 184, 0.1); }
-  .checkbox-label { display: flex !important; align-items: center; gap: 10px !important; text-transform: none !important; letter-spacing: normal !important; cursor: pointer; }
-  .checkbox-label input[type="checkbox"] { width: 18px !important; height: 18px; accent-color: #60a5fa; cursor: pointer; flex-shrink: 0; }
-  #toast { position: fixed; top: -60px; left: 50%; transform: translateX(-50%); background: rgba(15, 23, 42, 0.9); backdrop-filter: blur(10px); color: #f1f5f9; padding: 12px 24px; border-radius: 30px; font-size: 14px; font-weight: 500; transition: top 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); z-index: 9999; border: 1px solid rgba(96, 165, 250, 0.3); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3); }
-  #toast.show { top: 20px; }
-  .target-inputs { display: flex; flex-direction: column; gap: 10px; }
-  .target-input-row { display: flex; gap: 8px; align-items: center; }
-  .target-input-row input { flex: 1; margin-bottom: 0; }
-  .target-input-row .btn-remove { background: rgba(248, 113, 113, 0.15); border: 1px solid rgba(248, 113, 113, 0.3); color: #fca5a5; padding: 10px 14px; border-radius: 10px; cursor: pointer; font-size: 16px; flex-shrink: 0; }
-`;
-
-function buildFrontendHtml() {
-  const domainListJson = JSON.stringify(OPTIMIZED_DOMAINS);
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Emby 反代 | 智能优选</title><style>${PAGE_STYLE}</style></head><body>
-<div class="container">
-  <div class="card">
-    <h1>Emby 反向代理</h1>
-    <p class="muted">版本 ${CURRENT_VERSION} · 支持别名快捷入口与 CF 优选域名智能测速</p>
-    <p><a href="/admin" class="btn btn-outline">管理后台</a></p>
-  </div>
-  <div class="card">
-    <h2>当前边缘节点</h2>
-    <div id="edge-loading" class="muted">加载中...</div>
-    <div id="edge-info" class="edge-box" style="display:none"></div>
-  </div>
-  <div class="card">
-    <h2>优选域名测速（用户网络 → 优选入口）</h2>
-    <p class="muted">按延迟排序；同网段 IP 一小时内复用缓存结果</p>
-    <div class="toolbar"><button class="btn" id="btn-retest">重新测速</button><span id="speed-status" class="muted"></span></div>
-    <div id="domain-table-wrap"><p class="muted" id="domain-loading">正在测速...</p></div>
-  </div>
-  <div class="card">
-    <h2>使用格式</h2>
-    <p><code>https://你的域名/别名</code> 或 <code>https://你的域名/https://emby.example.com:8096</code></p>
-    <div class="warn">添加服务后请务必手动测试。恶意刷接口将封禁 IP。</div>
-  </div>
-  <div class="card">
-    <h2>使用统计（近30天）</h2>
-    <div id="stats-loading" class="muted">加载中...</div>
-    <div id="stats-body" style="display:none">
-      <div class="stat-row">
-        <div class="stat-card"><div>播放次数</div><div class="stat-val" id="st-play">0</div></div>
-        <div class="stat-card"><div>获取链接</div><div class="stat-val" id="st-pb">0</div></div>
-      </div>
-      <div id="daily-table"></div>
-    </div>
-  </div>
-</div>
-<script>
-const OPT_DOMAINS = ${domainListJson};
-const TAG = { fast:'极快', good:'良好', slow:'较慢', timeout:'超时' };
-const CLS = { fast:'tag-fast', good:'tag-good', slow:'tag-slow', timeout:'tag-timeout' };
-
-async function loadEdge() {
-  try {
-    const r = await fetch('/api/edge-info');
-    const d = await r.json();
-    document.getElementById('edge-loading').style.display = 'none';
-    const box = document.getElementById('edge-info');
-    box.style.display = 'grid';
-    box.innerHTML = [
-      ['客户端 IP', d.clientIp],
-      ['接入 POP', d.entryColo],
-      ['国家/地区', d.entryCountry + (d.entryCity ? ' / '+d.entryCity : '')],
-      ['边缘出口 IP', d.edgeIp],
-      ['落地 COLO', d.egressColo],
-    ].map(([k,v]) => '<div class="edge-item"><strong>'+k+'</strong>'+ (v||'—') +'</div>').join('');
-  } catch(e) { document.getElementById('edge-loading').textContent = '加载失败'; }
-}
-
-function renderDomainTable(results, best) {
-  const wrap = document.getElementById('domain-table-wrap');
-  if (!results.length) { wrap.innerHTML = '<p class="muted">无数据</p>'; return; }
-  let html = '<table><thead><tr><th>#</th><th>名称</th><th>域名</th><th>延迟</th><th>状态</th></tr></thead><tbody>';
-  results.forEach((r, i) => {
-    const host = r.host || (r.subdomain+'.'+r.domain);
-    const isBest = best && best === host;
-    html += '<tr class="'+(isBest?'best':'')+'"><td>'+(i+1)+'</td><td>'+ (r.name||r.display_name||'') +'</td><td><code>'+host+'</code></td><td>'+(r.latency>=0?r.latency+' ms':'—')+'</td><td><span class="tag '+CLS[r.status||'timeout']+'">'+(TAG[r.status]||'—')+'</span></td></tr>';
-  });
-  wrap.innerHTML = html + '</tbody></table>';
-}
-
-function pingMs(url, timeout) {
-  return new Promise((resolve) => {
-    const t0 = performance.now();
-    const timer = setTimeout(() => resolve(-1), timeout || 7000);
-    const done = (ms) => { clearTimeout(timer); resolve(ms >= 0 && ms < (timeout || 7000) ? ms : -1); };
-    fetch(url, { mode: 'no-cors', cache: 'no-store', credentials: 'omit' })
-      .then(() => done(Math.round(performance.now() - t0)))
-      .catch(() => {
-        const img = new Image();
-        const t1 = performance.now();
-        const t2 = setTimeout(() => done(-1), 5000);
-        const end = () => { clearTimeout(t2); done(Math.round(performance.now() - t1)); };
-        img.onload = end;
-        img.onerror = end;
-        img.src = url + (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
-      });
-  });
-}
-
-async function probeDomain(item) {
-  const host = item.subdomain + '.' + item.domain;
-  const paths = ['/cdn-cgi/trace', '/favicon.ico', '/'];
-  for (const p of paths) {
-    const ms = await pingMs('https://' + host + p, 7000);
-    if (ms >= 0) {
-      const status = ms < 100 ? 'fast' : ms < 300 ? 'good' : 'slow';
-      return { subdomain: item.subdomain, domain: item.domain, name: item.name, host, latency: ms, status, source: 'client' };
-    }
-  }
-  try {
-    const r = await fetch('/api/ping-host?host=' + encodeURIComponent(host));
-    const d = await r.json();
-    if (d.ms >= 0) {
-      const status = d.ms < 100 ? 'fast' : d.ms < 300 ? 'good' : 'slow';
-      return { subdomain: item.subdomain, domain: item.domain, name: item.name, host, latency: d.ms, status, source: 'edge' };
-    }
-  } catch (_) {}
-  return { subdomain: item.subdomain, domain: item.domain, name: item.name, host, latency: -1, status: 'timeout', source: 'none' };
-}
-
-function finalizeResults(rows) {
-  rows.forEach(r => { if (r.latency >= 0) r.status = r.latency < 100 ? 'fast' : r.latency < 300 ? 'good' : 'slow'; else r.status = 'timeout'; });
-  rows.sort((a,b) => { if (a.latency<0) return 1; if (b.latency<0) return -1; return a.latency-b.latency; });
-  return rows;
-}
-
-async function runDomainSpeed(force) {
-  const st = document.getElementById('speed-status');
-  const wrap = document.getElementById('domain-table-wrap');
-  if (!force) {
-    try {
-      const cached = await fetch('/api/domains/speed');
-      const data = await cached.json();
-      if (data.cached && data.results?.length) {
-        st.textContent = '已使用缓存（约1小时有效）';
-        renderDomainTable(data.results, data.best);
-        return;
-      }
-    } catch(e) {}
-  }
-  st.textContent = '加载边缘测速...';
-  wrap.innerHTML = '<p class="muted">测速中...</p>';
-  let results = [];
-  try {
-    const er = await fetch('/api/domains/speed?edge=1');
-    const ed = await er.json();
-    if (ed.results?.length) {
-      results = ed.results;
-      finalizeResults(results);
-      renderDomainTable(results, ed.best);
-      st.textContent = '边缘测速完成，正在用您的网络复测...';
-    }
-  } catch (_) {}
-  const clientResults = await Promise.all(OPT_DOMAINS.map(probeDomain));
-  finalizeResults(clientResults);
-  const clientOk = clientResults.filter(r => r.latency >= 0).length;
-  if (clientOk > 0) {
-    results = clientResults;
-    st.textContent = '浏览器测速完成（' + clientOk + '/12 可用）';
-    try {
-      await fetch('/api/domains/speed', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ results }) });
-    } catch(e) {}
-  } else if (!results.length) {
-    st.textContent = '测速失败，请检查网络或稍后重试';
-  }
-  const best = results.find(r => r.latency >= 0);
-  renderDomainTable(results, best ? best.host : null);
-  if (best && clientOk > 0) st.textContent += ' · 推荐: ' + best.host;
-}
-
-async function loadStats() {
-  try {
-    const r = await fetch('/stats');
-    const data = await r.json();
-    if (data.error) { document.getElementById('stats-loading').textContent = data.error; return; }
-    document.getElementById('stats-loading').style.display = 'none';
-    document.getElementById('stats-body').style.display = 'block';
-    document.getElementById('st-play').textContent = data.data.total.playing;
-    document.getElementById('st-pb').textContent = data.data.total.playbackInfo;
-    const daily = (data.data.dailyStats||[]).slice(0,10);
-    let t = '<table><tr><th>日期</th><th>播放</th><th>链接</th></tr>';
-    daily.forEach(s => { t += '<tr><td>'+s.date+'</td><td>'+s.playing_count+'</td><td>'+s.playback_info_count+'</td></tr>'; });
-    document.getElementById('daily-table').innerHTML = t + '</table>';
-  } catch(e) { document.getElementById('stats-loading').textContent = '统计加载失败'; }
-}
-
-document.getElementById('btn-retest').onclick = () => runDomainSpeed(true);
-loadEdge(); runDomainSpeed(false); loadStats();
-</script></body></html>`;
-}
-
-function buildLoginHtml() {
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>管理登录</title><style>${PAGE_STYLE}
-body{display:flex;align-items:center;justify-content:center;min-height:100vh;}
-.login-box{background:#252830;padding:40px;border-radius:16px;max-width:360px;width:100%;border-top:4px solid #0070f3;}
-</style></head><body><div class="login-box">
-<h1 style="text-align:center">管理后台</h1>
-<p class="muted" style="text-align:center">请输入 Worker 环境变量 ADMIN_TOKEN</p>
-<input type="password" id="tokenInput" placeholder="请输入管理密钥" onkeydown="if(event.key==='Enter')login()">
-<p id="loginErr" style="color:#e06c75;font-size:14px;min-height:1.2em"></p>
-<button class="btn" style="width:100%" id="loginBtn" onclick="login()">登录</button>
-<script>
-async function login(){
-  const t=document.getElementById('tokenInput').value.trim();
-  const err=document.getElementById('loginErr');
-  const btn=document.getElementById('loginBtn');
-  err.textContent='';
-  if(!t){ err.textContent='请输入密钥'; return; }
-  btn.disabled=true; btn.textContent='验证中...';
-  try{
-    const r=await fetch('/admin/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
-    const d=await r.json();
-    if(d.ok){ location.href='/admin'; return; }
-    err.textContent=d.error||'登录失败';
-  }catch(e){ err.textContent='请求失败: '+e.message; }
-  btn.disabled=false; btn.textContent='登录';
-}
-</script></div></body></html>`;
-}
-
-function buildAdminHtml() {
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>管理后台</title><style>${PAGE_STYLE}</style></head><body>
-<div id="toast"></div>
-<div class="container">
-  <div class="card">
-    <div class="toolbar" style="justify-content:space-between">
-      <h1 style="margin:0">🎛️ 管理后台</h1>
-      <div style="display:flex;gap:10px">
-        <a href="/" class="btn btn-outline btn-sm">🏠 首页</a>
-        <button class="btn btn-del btn-sm" onclick="logout()">🚪 退出</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;flex-wrap:wrap;gap:16px">
-      <h2 style="border:none;margin:0;padding:0">📦 路由管理</h2>
-      <div class="toolbar" style="margin:0">
-        <button class="btn" onclick="openRouteModal()">➕ 添加路由</button>
-        <button class="btn btn-outline" onclick="speedtestAll()">⚡ 全局测速</button>
-        <div class="search-box">
-          <span class="search-icon">🔍</span>
-          <input type="text" id="routeSearch" placeholder="搜索备注或路径..." oninput="filterRoutes()">
-        </div>
-      </div>
-    </div>
-    <div id="routeList" class="route-grid"><p class="muted">加载中...</p></div>
-  </div>
-
-  <div class="card">
-    <h2>⚡ 优选域名测速</h2>
-    <p class="muted" style="margin-bottom:16px">测试边缘节点到优选入口的延迟</p>
-    <button class="btn" onclick="testDomains()">🚀 开始测速</button>
-    <div id="adminDomainResult" style="margin-top:20px"></div>
-  </div>
-</div>
-
-<div id="modalRoute" class="modal">
-  <div class="modal-inner">
-    <div class="modal-header">
-      <h2 class="modal-title" id="routeModalTitle">➕ 添加路由</h2>
-      <p class="modal-desc">创建路由后可通过 /路径 快捷访问目标服务</p>
-    </div>
-    <input type="hidden" id="oldPrefix">
-    <div class="form-group">
-      <label>备注名</label>
-      <input id="routeRemark" placeholder="例如：我的 Emby 服务器">
-    </div>
-    <div class="form-group">
-      <label>路径 (prefix)</label>
-      <input id="routePrefix" placeholder="myemby">
-      <p class="form-hint">访问路径: https://你的域名/<span id="prefixPreview">myemby</span></p>
-    </div>
-    <div class="form-group">
-      <label>目标线路 (target)</label>
-      <div id="targetInputs" class="target-inputs">
-        <div class="target-input-row">
-          <input type="url" class="target-url-input" placeholder="主线路地址 (如: https://emby.example.com:8096)">
-          <button class="btn-remove" onclick="removeTargetInput(this)" title="移除">✕</button>
-        </div>
-      </div>
-      <button class="btn btn-outline btn-sm" style="margin-top:8px" onclick="addTargetInput()">➕ 添加备用线路</button>
-      <p class="form-hint">多个线路按顺序 failover，测速后按延迟排序优选</p>
-    </div>
-    <div class="form-group">
-      <label class="checkbox-label">
-        <input type="checkbox" id="routeCache" checked> 启用图片/静态资源缓存
-      </label>
-      <label class="checkbox-label" style="margin-top:12px">
-        <input type="checkbox" id="routeCompat"> 兼容模式
-      </label>
-      <p class="form-hint">兼容模式适用于部分无法正常播放的 Emby 服务器，开启后不重写媒体流地址，由客户端直连源站播放</p>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-outline" onclick="closeModal('modalRoute')">取消</button>
-      <button class="btn" onclick="saveRoute()">💾 保存</button>
-    </div>
-  </div>
-</div>
-
-<script>
-let allRoutes=[];
-
-function closeModal(id){document.getElementById(id).classList.remove('show');}
-function openModal(id){document.getElementById(id).classList.add('show');}
-
-function logout(){document.cookie='admin_token=;path=/;max-age=0';location.reload();}
-
-function showToast(msg){
-  var t=document.getElementById('toast');
-  if(!t){t=document.createElement('div');t.id='toast';document.body.appendChild(t);}
-  t.textContent=msg;t.classList.add('show');
-  setTimeout(function(){t.classList.remove('show');},2500);
-}
-
-function getLatencyInfo(ms){
-  if(ms<0)return {text:'超时',cls:'tag-timeout',color:'#f87171'};
-  if(ms<100)return {text:'极快',cls:'tag-fast',color:'#4ade80'};
-  if(ms<300)return {text:'良好',cls:'tag-good',color:'#93c5fd'};
-  return {text:'较慢',cls:'tag-slow',color:'#fbbf24'};
-}
-
-function addTargetInput(){
-  var container=document.getElementById('targetInputs');
-  var row=document.createElement('div');
-  row.className='target-input-row';
-  row.innerHTML='<input type="url" class="target-url-input" placeholder="备用线路地址"><button class="btn-remove" onclick="removeTargetInput(this)" title="移除">✕</button>';
-  container.appendChild(row);
-}
-
-function removeTargetInput(btn){
-  var container=document.getElementById('targetInputs');
-  if(container.querySelectorAll('.target-input-row').length>1){
-    btn.parentElement.remove();
-  }
-}
-
-async function loadRoutes(){
-  const r=await fetch('/admin/api/routes');
-  if(r.status===401){location.reload();return;}
-  allRoutes=await r.json();
-  renderRoutes(allRoutes);
-}
-
-function parseLatencies(latStr){
-  if(!latStr)return {};
-  try{return JSON.parse(latStr);}catch(e){return {};}
-}
-
-function renderRoutes(list){
-  const el=document.getElementById('routeList');
-  if(!list.length){
-    el.innerHTML='<div class="empty-state" style="grid-column:1/-1"><span class="empty-state-icon">📦</span><p class="empty-state-text">暂无路由，点击上方按钮添加</p></div>';
-    return;
-  }
-  el.innerHTML=list.map(r=>{
-    const targets=r.target.split(',').map(s=>s.trim()).filter(Boolean);
-    const latencies=parseLatencies(r.target_latencies);
-    const remarkName=r.remark||'未命名';
-    const cacheStatus=r.cache_img!=='off';
-    const compatStatus=r.compat_mode==='on';
-
-    let targetsHtml='';
-    targets.forEach((t,idx)=>{
-      const lat=latencies[t];
-      const latInfo=getLatencyInfo(lat);
-      const tag=idx===0?'<span style="color:#4ade80;font-weight:bold;">[主]</span>':'<span style="color:#fbbf24;font-weight:bold;">[备'+idx+']</span>';
-      const latDisplay=typeof lat==='number'&&lat>=0?'<span class="target-latency" style="color:'+latInfo.color+'">'+lat+'ms <span class="tag '+latInfo.cls+'">'+latInfo.text+'</span></span>':'<span class="target-latency" style="color:#64748b">未测速</span>';
-      targetsHtml+='<div class="target-row">'+tag+' <span class="target-url"><code>'+t+'</code></span>'+latDisplay+'</div>';
+    const upstreamRequest = new Request(upstreamUrl.toString(), {
+        method: request.method,
+        headers: upstreamRequestHeaders,
+        body: requestBody,
+        redirect: 'manual'
     });
 
-    return '<div class="route-item" data-search="'+(remarkName+' '+r.prefix).toLowerCase()+'">'+
-      '<div class="route-header">'+
-        '<div class="route-title">'+
-          '<h3 class="route-name">'+remarkName+'</h3>'+
-          '<span class="route-path">/'+r.prefix+'</span>'+
-        '</div>'+
-      '</div>'+
-      '<div class="target-list">'+targetsHtml+'</div>'+
-      '<div class="route-meta">'+
-        (cacheStatus?'<span class="meta-tag">🖼️ 缓存开启</span>':'<span class="meta-tag">缓存关闭</span>')+
-        (compatStatus?'<span class="meta-tag" style="background:rgba(251,191,36,0.2);color:#fbbf24">🔧 兼容模式</span>':'')+
-        (r.last_play?'<span class="meta-tag">📺 '+r.last_play+'</span>':'')+
-      '</div>'+
-      '<div class="route-actions">'+
-        '<button class="btn btn-sm btn-outline" onclick="speedtestRoute(\\''+r.prefix+'\\')">⚡ 测速</button>'+
-        '<button class="btn btn-sm btn-outline" onclick="editRoute(\\''+r.prefix+'\\')">✏️ 编辑</button>'+
-        '<button class="btn btn-sm btn-del" onclick="delRoute(\\''+r.prefix+'\\')">🗑️ 删除</button>'+
-      '</div>'+
-    '</div>';
-  }).join('');
+    const upstreamResponse = await fetch(upstreamRequest);
+
+    const location = upstreamResponse.headers.get('Location');
+    if (location && upstreamResponse.status >= 300 && upstreamResponse.status < 400) {
+        try {
+            const redirectUrl = new URL(location, upstreamUrl);
+            if (redirectUrl.hostname === upstreamUrl.hostname) {
+                return fetch(redirectUrl.toString(), upstreamRequest);
+            }
+            if (MANUAL_REDIRECT_DOMAINS.some(domain => redirectUrl.hostname.endsWith(domain))) {
+                const responseHeaders = new Headers(upstreamResponse.headers);
+                responseHeaders.set('Location', redirectUrl.toString());
+                return new Response(upstreamResponse.body, {
+                    status: upstreamResponse.status,
+                    statusText: upstreamResponse.statusText,
+                    headers: responseHeaders
+                });
+            }
+            const followHeaders = new Headers(upstreamRequestHeaders);
+            followHeaders.set('Host', redirectUrl.host);
+            return fetch(redirectUrl.toString(), {
+                method: request.method,
+                headers: followHeaders,
+                body: requestBody,
+                redirect: 'follow'
+            });
+        } catch (e) {
+            return upstreamResponse;
+        }
+    }
+
+    const responseHeaders = new Headers(upstreamResponse.headers);
+
+    const contentType = upstreamResponse.headers.get('content-type');
+    if (contentType && CONFIG.cacheEnabled) {
+        if (contentType.includes('image/') || contentType.includes('text/css') ||
+            contentType.includes('application/javascript') || contentType.includes('font/')) {
+            responseHeaders.set('Cache-Control', 'public, max-age=86400');
+        } else if (contentType.includes('video/') || contentType.includes('audio/')) {
+            responseHeaders.set('Cache-Control', 'public, max-age=3600');
+        } else {
+            responseHeaders.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        }
+    }
+
+    responseHeaders.set('Access-Control-Allow-Origin', '*');
+    responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    responseHeaders.set('Access-Control-Allow-Headers', '*');
+    responseHeaders.set('X-Content-Type-Options', 'nosniff');
+    responseHeaders.set('X-Frame-Options', 'DENY');
+    responseHeaders.set('X-XSS-Protection', '1; mode=block');
+    responseHeaders.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    responseHeaders.delete('Content-Security-Policy');
+
+    return new Response(upstreamResponse.body, {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headers: responseHeaders
+    });
 }
 
-function filterRoutes(){
-  const q=document.getElementById('routeSearch').value.toLowerCase();
-  document.querySelectorAll('.route-item').forEach(c=>{
-    c.style.display=(!q||c.dataset.search.includes(q))?'block':'none';
-  });
-}
+async function handleAliasProxy(request, env, ctx, url, aliasPath) {
+    if (!env.DB) {
+        return new Response('Database not available', { status: 500 });
+    }
 
-function openRouteModal(){
-  document.getElementById('oldPrefix').value='';
-  document.getElementById('routeRemark').value='';
-  document.getElementById('routePrefix').value='';
-  document.getElementById('routeCache').checked=true;
-  document.getElementById('routeCompat').checked=false;
-  document.getElementById('prefixPreview').textContent='myemby';
-  document.getElementById('routeModalTitle').textContent='➕ 添加路由';
-  var container=document.getElementById('targetInputs');
-  container.innerHTML='<div class="target-input-row"><input type="url" class="target-url-input" placeholder="主线路地址 (如: https://emby.example.com:8096)"><button class="btn-remove" onclick="removeTargetInput(this)" title="移除">✕</button></div>';
-  openModal('modalRoute');
-}
+    const config = await getAliasConfig(env, aliasPath);
+    if (!config || !config.alias) {
+        return new Response('Alias not found: ' + aliasPath, { status: 404 });
+    }
 
-function editRoute(prefix){
-  const r=allRoutes.find(x=>x.prefix===prefix);
-  if(!r)return;
-  document.getElementById('oldPrefix').value=r.prefix;
-  document.getElementById('routeRemark').value=r.remark||'';
-  document.getElementById('routePrefix').value=r.prefix;
-  document.getElementById('routeCache').checked=r.cache_img!=='off';
-  document.getElementById('routeCompat').checked=r.compat_mode==='on';
-  document.getElementById('prefixPreview').textContent=r.prefix;
-  document.getElementById('routeModalTitle').textContent='✏️ 编辑路由';
+    const { alias, lines } = config;
 
-  var container=document.getElementById('targetInputs');
-  container.innerHTML='';
-  var targets=r.target.split(',').map(s=>s.trim()).filter(Boolean);
-  targets.forEach(function(t){
-    var row=document.createElement('div');
-    row.className='target-input-row';
-    row.innerHTML='<input type="url" class="target-url-input" value="'+t+'"><button class="btn-remove" onclick="removeTargetInput(this)" title="移除">✕</button>';
-    container.appendChild(row);
-  });
-  if(!targets.length){
-    var row=document.createElement('div');
-    row.className='target-input-row';
-    row.innerHTML='<input type="url" class="target-url-input" placeholder="主线路地址"><button class="btn-remove" onclick="removeTargetInput(this)" title="移除">✕</button>';
-    container.appendChild(row);
-  }
-  openModal('modalRoute');
-}
+    if (!lines || lines.length === 0) {
+        return new Response('No lines configured for alias: ' + aliasPath, { status: 502 });
+    }
 
-async function saveRoute(){
-  const oldPrefix=document.getElementById('oldPrefix').value;
-  const remark=document.getElementById('routeRemark').value.trim();
-  const prefix=document.getElementById('routePrefix').value.trim().replace(/^\\/+|\\/+$/g,'');
-  const cache_img=document.getElementById('routeCache').checked?'on':'off';
-  const compat_mode=document.getElementById('routeCompat').checked?'on':'off';
+    const aliasPrefix = '/' + aliasPath;
+    const remainingPath = url.pathname.substring(aliasPrefix.length) || '/';
+    const targetSearch = url.search;
 
-  var targetInputs=document.querySelectorAll('.target-url-input');
-  var targets=[];
-  targetInputs.forEach(function(inp){
-    var val=inp.value.trim().replace(/\\/$/g,'');
-    if(val)targets.push(val);
-  });
-  const target=targets.join(',');
+    let preReadBody = null;
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) {
+        preReadBody = await readRequestBody(request);
+    }
 
-  if(!prefix){showToast('请输入路径');return;}
-  if(!target){showToast('请至少填写一个主线路地址');return;}
+    let lastError = null;
 
-  document.getElementById('prefixPreview').textContent=prefix||'myemby';
+    for (const line of lines) {
+        try {
+            const targetBase = line.target_url.replace(/\/+$/, '');
+            const targetPath = remainingPath + targetSearch;
+            const upstreamUrl = new URL(targetPath, targetBase);
 
-  const r=await fetch('/admin/api/routes',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({oldPrefix:oldPrefix,prefix:prefix,target:target,remark:remark,cache_img:cache_img,compat_mode:compat_mode})
-  });
-  const j=await r.json();
-  if(!r.ok){showToast(j.error||'保存失败');return;}
-  closeModal('modalRoute');
-  showToast('保存成功');
-  loadRoutes();
-}
+            if (upstreamUrl.pathname.endsWith('/Sessions/Playing')) {
+                ctx.waitUntil(recordStats(env, 'playing'));
+            } else if (upstreamUrl.pathname.includes('/PlaybackInfo')) {
+                ctx.waitUntil(recordStats(env, 'playback_info'));
+            }
 
-async function delRoute(prefix){
-  if(!confirm('确定删除路由 /'+prefix+' ？'))return;
-  await fetch('/admin/api/routes?prefix='+encodeURIComponent(prefix),{method:'DELETE'});
-  showToast('已删除');
-  loadRoutes();
-}
+            const response = await proxyToTarget(request, upstreamUrl, line.mode, env, preReadBody);
+            if (response.status < 500) {
+                return response;
+            }
+            lastError = response;
+        } catch (e) {
+            lastError = e;
+            continue;
+        }
+    }
 
-async function speedtestRoute(prefix){
-  showToast('测速中...');
-  const r=await fetch('/admin/api/speedtest/routes?prefix='+encodeURIComponent(prefix),{method:'POST'});
-  const d=await r.json();
-  const ok=(d.results||[]).filter(x=>x.latency>=0).length;
-  showToast('测速完成，'+ok+'条线路可用');
-  loadRoutes();
-}
-
-async function speedtestAll(){
-  showToast('全局测速中，请耐心等待...');
-  const r=await fetch('/admin/api/speedtest/routes',{method:'POST'});
-  const d=await r.json();
-  showToast('全局测速完成');
-  loadRoutes();
-}
-
-async function testDomains(){
-  document.getElementById('adminDomainResult').innerHTML='<p class="muted">测速中...</p>';
-  const r=await fetch('/admin/api/speedtest/domains',{method:'POST'});
-  const d=await r.json();
-  let h='<table><thead><tr><th>名称</th><th>域名</th><th>延迟</th><th>状态</th></tr></thead><tbody>';
-  (d.results||[]).forEach(x=>{
-    const status=getLatencyInfo(x.latency);
-    h+='<tr'+(d.best===x.host?' class="best"':'')+'>'+
-      '<td>'+(x.name||'—')+'</td>'+
-      '<td><code>'+x.host+'</code></td>'+
-      '<td>'+(x.latency>=0?x.latency+'ms':'超时')+'</td>'+
-      '<td><span class="tag '+status.cls+'">'+status.text+'</span></td>'+
-    '</tr>';
-  });
-  document.getElementById('adminDomainResult').innerHTML=h+'</tbody></table>';
-}
-
-document.getElementById('routePrefix').addEventListener('input',function(){
-  document.getElementById('prefixPreview').textContent=this.value.trim()||'myemby';
-});
-
-loadRoutes();
-</script>
-</body></html>`;
+    if (lastError instanceof Response) return lastError;
+    return new Response('All lines failed for alias: ' + aliasPath, { status: 502 });
 }
 
 export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
+    async fetch(request, env, ctx) {
+        const url = new URL(request.url);
+        const path = url.pathname;
 
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': '*',
-        },
-      });
-    }
-
-    if (env.DB) await initDatabase(env);
-
-    if (url.pathname === '/__client_rtt__') {
-      return new Response(null, {
-        status: 204,
-        headers: { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' },
-      });
-    }
-
-    if (url.pathname === '/') return html(buildFrontendHtml());
-    if (url.pathname === '/favicon.ico') return new Response('', { headers: { 'Content-Type': 'image/x-icon' } });
-    if (url.pathname.startsWith('/cdn-cgi/')) return new Response('Not Found', { status: 404 });
-
-    if (url.pathname === '/health') {
-      return json({ status: 'ok', version: CURRENT_VERSION, colo: request.cf?.colo, timestamp: new Date().toISOString() });
-    }
-
-    if (url.pathname === '/stats') return handleStatsRequest(env);
-
-    if (url.pathname === '/api/edge-info') return json(await getEdgeInfo(request));
-
-    if (url.pathname === '/api/ping-host') {
-      const host = (url.searchParams.get('host') || '').replace(/^https?:\/\//, '').split('/')[0];
-      if (!host) return json({ ms: -1, error: 'missing host' });
-      const ms = await speedtestUrl(`https://${host}/cdn-cgi/trace`, 5000);
-      return json({ ms, host });
-    }
-
-    if (url.pathname === '/api/domains/speed') {
-      const cacheKey = getClientCacheKey(request);
-      if (request.method === 'GET') {
-        if (url.searchParams.get('edge') === '1') {
-          const data = await speedtestOptimizedFromEdge();
-          const results = data.results.map((r) => ({
-            subdomain: r.subdomain, domain: r.domain, name: r.name, host: r.host,
-            latency: r.latency, status: r.status, source: 'edge',
-          }));
-          return json({ cached: false, edge: true, best: data.best, results });
+        if (request.method === 'OPTIONS') {
+            return new Response(null, PREFLIGHT_INIT);
         }
-        if (!env.DB) return json({ cached: false, cacheKey, results: [] });
-        const cached = await loadDomainSpeedCache(env, cacheKey);
-        if (cached) return json(cached);
-        return json({ cached: false, cacheKey, results: [], domains: OPTIMIZED_DOMAINS });
-      }
-      if (request.method === 'POST') {
-        if (!env.DB) return json({ success: false, error: 'DB not bound' }, 500);
-        const body = await request.json();
-        const rows = (body.results || []).map((r) => ({
-          subdomain: r.subdomain,
-          domain: r.domain,
-          name: r.name || r.display_name,
-          latency: r.latency,
-          status: r.status || latencyStatus(r.latency),
-        }));
-        await saveDomainSpeedCache(env, cacheKey, rows);
-        const best = rows.filter((r) => r.latency >= 0).sort((a, b) => a.latency - b.latency)[0];
-        return json({ success: true, best: best ? `${best.subdomain}.${best.domain}` : null });
-      }
+
+        if (env.DB && !_dbInitialized) {
+            ctx.waitUntil(initDB(env).then(() => { _dbInitialized = true; }));
+        }
+
+        if (path === '/health') {
+            return new Response(JSON.stringify({
+                status: 'ok',
+                timestamp: new Date().toISOString(),
+                region: request.cf?.colo
+            }), { headers: { 'Content-Type': 'application/json' } });
+        }
+
+        if (path === '/stats') {
+            return handleStatsRequest(env);
+        }
+
+        if (path === '/api/connection-info') {
+            return handleConnectionInfo(request);
+        }
+
+        if (path === '/api/best-domain') {
+            return handleBestDomain(request, env);
+        }
+
+        if (path === '/api/speedtest/domains' && request.method === 'POST') {
+            return handleDomainSpeedTest(request, env);
+        }
+
+        if (path === '/') {
+            return new Response(FRONTEND_HTML, {
+                headers: { 'Content-Type': 'text/html; charset=utf-8' }
+            });
+        }
+
+        if (path === '/favicon.ico') {
+            return new Response('', { headers: { 'Content-Type': 'image/x-icon' } });
+        }
+
+        if (path.startsWith('/cdn-cgi/')) {
+            return new Response('Not Found', { status: 404 });
+        }
+
+        if (path === '/admin') {
+            if (!isAdmin(request, env)) {
+                return new Response(LOGIN_UI, {
+                    headers: { 'Content-Type': 'text/html; charset=utf-8' }
+                });
+            }
+            return new Response(ADMIN_UI, {
+                headers: { 'Content-Type': 'text/html; charset=utf-8' }
+            });
+        }
+
+        if (path === '/admin/api/verify') {
+            const noToken = !env.ADMIN_TOKEN;
+            if (noToken) {
+                return new Response(JSON.stringify({ ok: true, noToken: true }), {
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
+            if (isAdmin(request, env)) {
+                return new Response(JSON.stringify({ ok: true }), {
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
+            return new Response(JSON.stringify({ ok: false, error: '密钥错误' }), {
+                status: 401,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+
+        if (path.startsWith('/admin/api/')) {
+            try {
+                return await handleAdminRequest(request, env, url);
+            } catch (e) {
+                return new Response(JSON.stringify({ error: 'Server error: ' + e.message }), {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                });
+            }
+        }
+
+        const pathSegments = path.split('/').filter(Boolean);
+        if (pathSegments.length > 0) {
+            const firstSegment = pathSegments[0];
+            const looksLikeUrl = firstSegment.includes(':') || firstSegment.startsWith('http');
+
+            if (!looksLikeUrl && env.DB) {
+                try {
+                    const cached = await getAliasConfig(env, firstSegment);
+                    if (cached && cached.alias) {
+                        return handleAliasProxy(request, env, ctx, url, firstSegment);
+                    }
+                } catch (e) {
+                    // cache/DB error, fall through to normal proxy
+                }
+            }
+        }
+
+        let upstreamUrl;
+        try {
+            let pathStr = url.pathname.substring(1);
+
+            if (pathStr.startsWith('/')) {
+                return new Response('Invalid proxy format.', { status: 400 });
+            }
+
+            if (pathStr === 'Sessions/Playing' || pathStr.startsWith('Sessions/Playing/') || pathStr === 'PlaybackInfo' || pathStr.startsWith('PlaybackInfo/')) {
+                return new Response('Invalid proxy format.', { status: 400 });
+            }
+
+            pathStr = pathStr.replace(/^(https?)\/(?!\/)/, '$1://');
+            if (!pathStr.startsWith('http')) {
+                pathStr = 'https://' + pathStr;
+            }
+            upstreamUrl = new URL(pathStr);
+            upstreamUrl.search = url.search;
+
+            const hostname = upstreamUrl.hostname;
+            if (!hostname || hostname === 'Sessions' || hostname === 'PlaybackInfo') {
+                return new Response('Invalid proxy format.', { status: 400 });
+            }
+
+            if (PIKPAK_DOMAINS.some(domain => hostname.endsWith(domain))) {
+                const redirectUrl = new URL(upstreamUrl.pathname + upstreamUrl.search, CONFIG.pikpakProxyUrl);
+                return Response.redirect(redirectUrl.toString(), 301);
+            }
+
+            if (blocker.check(upstreamUrl.toString())) {
+                return Response.redirect('https://baidu.com', 301);
+            }
+        } catch (e) {
+            return new Response('Invalid URL format.', { status: 400 });
+        }
+
+        const currentEdgeColo = request.cf?.colo;
+        if (currentEdgeColo && JP_COLOS.includes(currentEdgeColo)) {
+            const originalHost = upstreamUrl.host;
+            for (const domainSuffix in DOMAIN_PROXY_RULES) {
+                if (originalHost.endsWith(domainSuffix)) {
+                    upstreamUrl.hostname = DOMAIN_PROXY_RULES[domainSuffix];
+                    break;
+                }
+            }
+        }
+
+        if (upstreamUrl.pathname.endsWith('/Sessions/Playing')) {
+            ctx.waitUntil(recordStats(env, 'playing'));
+        } else if (upstreamUrl.pathname.includes('/PlaybackInfo')) {
+            ctx.waitUntil(recordStats(env, 'playback_info'));
+        }
+
+        return proxyToTarget(request, upstreamUrl, 'off', env);
     }
-
-    if (url.pathname === '/admin/api/login' && request.method === 'POST') {
-      try {
-        const body = await request.json();
-        return adminLoginResponse(request, env, String(body.token || '').trim());
-      } catch (e) {
-        return json({ ok: false, error: e.message }, 400);
-      }
-    }
-
-    if (url.pathname === '/admin' || url.pathname === '/admin/') {
-      if (!isAdmin(request, env)) return html(buildLoginHtml());
-      return html(buildAdminHtml());
-    }
-
-    if (url.pathname.startsWith('/admin/api/')) {
-      if (!isAdmin(request, env)) return new Response('Unauthorized', { status: 401 });
-      if (!env.DB) return json({ error: 'DB 未绑定' }, 500);
-      return handleAdminApi(request, env, url);
-    }
-
-    const pathFirst = url.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
-    const looksLikeDirectUrl = url.pathname.startsWith('/http://') || url.pathname.startsWith('/https://') ||
-      (pathFirst && (pathFirst.includes('.') || pathFirst.includes(':')));
-
-    if (looksLikeDirectUrl) {
-      let path = url.pathname.substring(1);
-      if (path.startsWith('/')) return new Response('Invalid proxy format', { status: 400 });
-      path = path.replace(/^(https?)\/(?!\/)/, '$1://');
-      if (!path.startsWith('http')) path = 'https://' + path;
-      try {
-        const upstreamUrl = new URL(path);
-        upstreamUrl.search = url.search;
-        return proxyDirectUrl(request, env, ctx, [upstreamUrl.toString()], { enableCache: true });
-      } catch {
-        return new Response('Invalid URL format', { status: 400 });
-      }
-    }
-
-    if (!env.DB) {
-      return new Response('D1 数据库未绑定，路由反代不可用。仍可使用 /https://... 格式。', { status: 500 });
-    }
-
-    const resolved = await resolveProxyTarget(request, env, url);
-    if (resolved.error) return resolved.error;
-
-    return proxyDirectUrl(request, env, ctx, resolved.upstreamUrls, {
-      enableCache: resolved.enableCache,
-      compatMode: resolved.compatMode,
-      matchedPrefix: resolved.matchedPrefix,
-      needsSpeedTest: resolved.needsSpeedTest,
-    });
-  },
 };

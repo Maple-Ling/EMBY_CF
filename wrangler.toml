@@ -1,11 +1,22 @@
+# wrangler.toml - Cloudflare Worker Emby 反向代理配置
+# 使用前请根据自己的环境修改以下配置
+
 name = "emby-proxy"
 main = "worker.js"
-compatibility_date = "2025-05-15"
+compatibility_date = "2026-03-01"
+workers_dev = true
+
+# 自定义域名路由（可选，按需修改）
+# routes = [
+#     { pattern = "your-domain.com/*", zone_name = "your-domain.com" }
+# ]
 
 [vars]
-BASE_DOMAIN = "example.com"
+ADMIN_TOKEN = "your-admin-token-here"
 
-[[d1_databases]]
-binding = "DB"
-database_name = "emby-proxy-db"
-database_id = ""
+# D1 数据库绑定（可选，用于别名管理和统计功能）
+# 请将 database_id 替换为你自己创建的 D1 数据库 ID
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "emby-proxy-db"
+# database_id = "your-d1-database-id-here"
