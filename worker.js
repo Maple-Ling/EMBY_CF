@@ -556,6 +556,18 @@ function normalizeAlias(a) {
 }
 
 async function proxyDirectUrl(request, env, ctx, upstreamUrls, opts = {}) {
+// 放在函数最开头，任何逻辑之前
+if (request.method === 'OPTIONS') {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': '*',
+    },
+  });
+}
+
   const { enableCache = true, compatMode = false, matchedPrefix = null } = opts;
 
   if (!upstreamUrls.length) return new Response('404: Target empty', { status: 404 });
@@ -621,28 +633,39 @@ async function proxyDirectUrl(request, env, ctx, upstreamUrls, opts = {}) {
       }
     }
 
+    // --- 修改开始：这是你原本逻辑的替换部分 ---
     const headers = new Headers(request.headers);
+    // 1. 删除危险的 Hop-by-hop Headers
+    ['Connection', 'Keep-Alive', 'Transfer-Encoding', 'Upgrade', 'Proxy-Connection', 'TE', 'Trailer'].forEach(h => headers.delete(h));
+
+    // 2. 规范化 Host/Origin/Referer
     headers.set('Host', upstreamUrl.host);
-    headers.delete('Referer');
+    if (request.headers.has('Origin')) headers.set('Origin', upstreamUrl.origin);
+    if (request.headers.has('Referer')) headers.set('Referer', upstreamUrl.origin + '/');
+    else headers.set('Referer', upstreamUrl.origin + '/'); // 强制补一个
+
+    // 3. 增强 X-Forwarded 系列
     const clientIp = request.headers.get('cf-connecting-ip');
     if (clientIp) {
       headers.set('x-forwarded-for', clientIp);
       headers.set('x-real-ip', clientIp);
-    }
-    if (compatMode) {
-      headers.set('Origin', upstreamUrl.origin);
       headers.set('X-Forwarded-Proto', upstreamUrl.protocol.replace(':', ''));
       headers.set('X-Forwarded-Host', upstreamUrl.host);
     }
 
+    // 4. 构建 fetchInit
     const fetchInit = {
       method: request.method,
-      headers,
+      headers: headers,
+      body: requestBody || undefined,
       redirect: compatMode ? 'follow' : 'manual',
+      cf: {
+        cacheEverything: false, // 核心：禁用缓存
+      },
     };
-    if (requestBody) fetchInit.body = requestBody;
 
     try {
+      // 5. 构造标准的 Request 发起请求
       const response = await fetch(new Request(upstreamUrl.toString(), fetchInit));
       if (!compatMode && [502, 503, 504].includes(response.status)) {
         lastError = new Error(`HTTP ${response.status}`);
@@ -655,6 +678,7 @@ async function proxyDirectUrl(request, env, ctx, upstreamUrls, opts = {}) {
       lastError = err;
       continue;
     }
+    // --- 修改结束 ---
   }
 
   if (!finalResponse) {
